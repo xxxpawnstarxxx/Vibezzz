@@ -23,6 +23,12 @@ import { GamepadInput, PAD } from "./gamepad.js";
 import { HalfSword } from "./runtime/half_sword.js";
 import { HalfSwordInput } from "./half_sword_input.js";
 import { createSword } from "./render/sword.js";
+import { BodyColliders, CombatSystem, HitReactor } from "./runtime/combat.js";
+import type { CombatEvent, Fighter } from "./runtime/combat.js";
+import { DummyAI } from "./runtime/dummy_ai.js";
+import type { DummySettings } from "./runtime/dummy_ai.js";
+import { BladeTrail, CombatFx } from "./render/combat_fx.js";
+import { Sfx } from "./audio/sfx.js";
 import { Debug } from "./render/debug.js";
 import { UI } from "./render/ui.js";
 import type { DirectionalLightParams, LookParams } from "./render/ui.js";
@@ -69,7 +75,9 @@ interface AgentRecord {
   label: string;           // "Biped #1", "Dog #3"
   kind: ModelKind;
   agent: NMMAgent;
-  brain: Brain | null;     // null iff this agent is the player
+  brain: Brain | null;     // null iff this agent is the player (or a dummy)
+  /** Sparring dummy — driven by DummyAI, never player-controlled. */
+  dummy?: boolean;
 }
 
 async function boot() {
@@ -123,6 +131,21 @@ async function boot() {
   const sword = createSword();
   scene.add(sword);
   const hsState = { enabled: false, halfGrip: false };
+
+  // Combat: body colliders for every biped, blade contacts, dummies, FX.
+  const skelBones = bipedEngine.mesh.skeleton.bones;
+  const boneParents = skelBones.map((b) => skelBones.indexOf(b.parent as THREE.Bone));
+  const combat = new CombatSystem(new BodyColliders(bipedEngine.rig.boneNameToIndex));
+  const fx = new CombatFx();
+  scene.add(fx.group);
+  const sfx = new Sfx();
+  const playerTrail = new BladeTrail();
+  scene.add(playerTrail.mesh);
+  interface DummyRec { id: string; ai: DummyAI; sword: HalfSword; mesh: THREE.Group; trail: BladeTrail }
+  const dummies = new Map<string, DummyRec>();
+  const dummySettings: DummySettings = { aggression: 0.55, blockSkill: 0.55, fightsBack: true, power: 0.6 };
+  let dummyCounter = 0;
+  let hitStop = 0;
   /** Fighter heading in Half Sword mode — turned with Q / E; orbiting the
    *  camera (MMB) doesn't turn the fighter. */
   const hsHeading = new THREE.Vector3(0, 0, 1);
@@ -208,6 +231,7 @@ async function boot() {
     const { origin, direction } = _ray.ray;
     let best: string | null = null, bestT = Infinity;
     for (const r of agents.values()) {
+      if (r.dummy) continue;
       const [px, py, pz] = r.agent.getPosition();
       const height = r.kind === "biped" ? 1.8 : 0.8;
       const radius = r.kind === "biped" ? 0.35 : 0.45;
@@ -299,7 +323,7 @@ async function boot() {
   }
 
   function rosterOptions() {
-    return Array.from(agents.values()).map((r) => ({ id: r.id, label: r.label }));
+    return Array.from(agents.values()).filter((r) => !r.dummy).map((r) => ({ id: r.id, label: r.label }));
   }
 
   function contactLabelsFor(kind: ModelKind): [string, string, string, string] {
@@ -371,6 +395,8 @@ async function boot() {
       settings: halfSword.settings,
       onToggle: (on) => { if (on !== halfSword.enabled) setHalfSword(on); },
       onSwapHands: () => halfSword.swapHands(),
+      dummy: dummySettings,
+      onSpawnDummy: () => spawnDummy(),
     },
     look: {
       params: lookParams,
@@ -448,6 +474,7 @@ async function boot() {
 
     const record: AgentRecord = { id, label, kind, agent, brain };
     agents.set(id, record);
+    if (kind === "biped") addFighter(id, label, agent);
 
     // Refresh UI dropdown.
     const opts = rosterOptions();
@@ -480,7 +507,10 @@ async function boot() {
     for (const r of agents.values()) {
       const engine = r.kind === "biped" ? bipedEngine : quadrupedEngine;
       engine.removeAgent(r.agent);
+      combat.remove(r.id);
     }
+    for (const d of dummies.values()) { scene.remove(d.mesh, d.trail.mesh); }
+    dummies.clear();
     agents.clear();
     setPlayer(null);
     ui.rebuildSteerDropdown([]);
@@ -526,7 +556,7 @@ async function boot() {
   }
 
   function cyclePlayer(): void {
-    const ids = Array.from(agents.keys());
+    const ids = Array.from(agents.values()).filter((r) => !r.dummy).map((r) => r.id);
     if (ids.length === 0) return;
     const cur = playerId ? ids.indexOf(playerId) : -1;
     const next = ids[(cur + 1) % ids.length];
@@ -536,16 +566,146 @@ async function boot() {
   // --- Half Sword --------------------------------------------------------
   const hudHint = document.getElementById("hs-hint");
 
-  /** Hook the sword arms onto the current biped player only. */
+  /** Player sword follows the current biped player; re-hook overrides. */
   function attachHalfSword(): void {
-    for (const r of agents.values()) {
-      if (r.kind === "biped") r.agent.actor.poseOverride = null;
-    }
     halfSword.reset();
-    const player = playerId ? agents.get(playerId) : null;
-    if (halfSword.enabled && player?.kind === "biped") {
-      player.agent.actor.poseOverride = halfSword.apply;
+    refreshOverrides();
+  }
+
+  /** Per-biped pose override: hit-reaction flinch first (it moves the whole
+   *  upper body), then the sword arms (IK reads the flinched chest). */
+  function refreshOverrides(): void {
+    for (const f of combat.fighters.values()) {
+      const dummy = dummies.get(f.id);
+      f.sword = dummy ? dummy.sword
+        : f.id === playerId && halfSword.enabled ? halfSword : null;
+      const sw = f.sword;
+      f.agent.actor.poseOverride = (w) => { f.reactor.apply(w); sw?.apply(w); };
     }
+  }
+
+  function addFighter(id: string, label: string, agent: NMMAgent): Fighter {
+    const f: Fighter = {
+      id, label, agent, sword: null, health: 100, maxHealth: 100, downTime: 0, capsules: [],
+      reactor: new HitReactor(boneParents, bipedEngine.rig.boneNameToIndex),
+    };
+    combat.add(f);
+    refreshOverrides();
+    return f;
+  }
+
+  /** Spawn a sword-wielding sparring dummy in front of the player. */
+  function spawnDummy(): void {
+    if (bipedEngine.agentCount >= MAX_AGENTS_PER_KIND) return;
+    const player = playerId ? agents.get(playerId) : null;
+    const base = player ? player.agent.getPosition() : [0, 0, 0];
+    const dir = player ? hsHeading.clone() : new THREE.Vector3(0, 0, 1);
+    const n = dummies.size;
+    const side = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 1.6);
+    const pos: Vec3 = [base[0] + dir.x * 2.0 + side.x, 0, base[2] + dir.z * 2.0 + side.z];
+    const agent = bipedEngine.createAgent({ position: pos, facing: [-dir.x, 0, -dir.z], style: "Neutral" });
+    const id = `dummy-${++dummyCounter}`;
+    const label = `Dummy #${dummyCounter}`;
+    agents.set(id, { id, label, kind: "biped", agent, brain: null, dummy: true });
+    const sword = new HalfSword(bipedEngine.rig);
+    const fighter = addFighter(id, label, agent);
+    const ai = new DummyAI(fighter, sword);
+    ai.settings = dummySettings;
+    const mesh = createSword();
+    const trail = new BladeTrail(new THREE.Color(1.0, 0.88, 0.8));
+    scene.add(mesh, trail.mesh);
+    dummies.set(id, { id, ai, sword, mesh, trail });
+    refreshOverrides();
+  }
+
+  // --- combat feedback -----------------------------------------------------
+  const hud = {
+    root: document.getElementById("combat-hud"),
+    you: document.getElementById("hp-you"),
+    foe: document.getElementById("hp-foe"),
+    foeLabel: document.getElementById("hp-foe-label"),
+    vignette: document.getElementById("hit-vignette"),
+    banner: document.getElementById("combat-banner"),
+    popups: document.getElementById("dmg-layer"),
+  };
+  let bannerTimer = 0;
+
+  function popup(point: THREE.Vector3, text: string, cls: string): void {
+    if (!hud.popups) return;
+    const v = point.clone().project(camera);
+    if (v.z > 1) return;
+    const el = document.createElement("div");
+    el.className = `dmg ${cls}`;
+    el.textContent = text;
+    el.style.left = `${(v.x * 0.5 + 0.5) * window.innerWidth}px`;
+    el.style.top = `${(-v.y * 0.5 + 0.5) * window.innerHeight}px`;
+    hud.popups.appendChild(el);
+    setTimeout(() => el.remove(), 900);
+  }
+
+  function banner(text: string): void {
+    if (!hud.banner) return;
+    hud.banner.textContent = text;
+    hud.banner.classList.remove("show");
+    void hud.banner.offsetWidth;   // restart the CSS animation
+    hud.banner.classList.add("show");
+    bannerTimer = 2;
+  }
+
+  const combatStats = { hits: 0, parries: 0, grazes: 0, damageDealt: 0, damageTaken: 0 };
+  function handleCombatEvents(events: CombatEvent[]): void {
+    for (const e of events) {
+      if (e.kind === "hit") {
+        combatStats.hits++;
+        if (e.attacker.id === playerId) combatStats.damageDealt += e.damage;
+        if (e.target.id === playerId) combatStats.damageTaken += e.damage;
+      } else if (e.kind === "parry") combatStats.parries++;
+      else if (e.kind === "graze") combatStats.grazes++;
+      if (e.kind === "hit") {
+        const involvesPlayer = e.attacker.id === playerId || e.target.id === playerId;
+        fx.impactAt(e.point, e.dir, e.speed);
+        sfx.hit(e.speed, e.thrust);
+        hitStop = Math.max(hitStop, 0.045 + e.damage * 0.0025);
+        if (involvesPlayer) fx.shake(0.008 + e.damage * 0.0009);
+        const label = e.thrust ? "THRUST" : e.zone === "head" ? "HEAD" : e.zone === "neck" ? "NECK" : "";
+        popup(e.point, `${label ? label + " " : ""}${e.damage}`, e.target.id === playerId ? "taken" : e.zone === "head" || e.zone === "neck" ? "crit" : "");
+        if (e.target.id === playerId && hud.vignette) {
+          hud.vignette.classList.remove("flash");
+          void hud.vignette.offsetWidth;
+          hud.vignette.classList.add("flash");
+        }
+      } else if (e.kind === "parry") {
+        const involvesPlayer = e.a.id === playerId || e.b.id === playerId;
+        fx.sparksAt(e.point, e.normal, e.speed);
+        sfx.clang(e.speed);
+        hitStop = Math.max(hitStop, 0.03 + Math.min(e.speed, 8) * 0.004);
+        if (involvesPlayer) fx.shake(0.006 + e.speed * 0.0015);
+        if (e.speed > 3.5) popup(e.point, "PARRY", "parry");
+      } else if (e.kind === "graze") {
+        sfx.tap();
+      } else if (e.kind === "down") {
+        banner(e.target.id === playerId ? "YOU ARE DOWN" : `${e.target.label.toUpperCase()} DOWN`);
+      }
+    }
+  }
+
+  function updateHud(): void {
+    if (!hud.root) return;
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    if (hud.you) hud.you.style.width = `${me ? (me.health / me.maxHealth) * 100 : 0}%`;
+    // Show the nearest dummy.
+    let foe: Fighter | null = null, best = Infinity;
+    const pp = me?.agent.getPosition();
+    for (const d of dummies.values()) {
+      const f = combat.fighters.get(d.id);
+      if (!f) continue;
+      const q = f.agent.getPosition();
+      const dist = pp ? Math.hypot(q[0] - pp[0], q[2] - pp[2]) : 0;
+      if (dist < best) { best = dist; foe = f; }
+    }
+    hud.root.classList.toggle("has-foe", foe !== null);
+    if (foe && hud.foe) hud.foe.style.width = `${(foe.health / foe.maxHealth) * 100}%`;
+    if (foe && hud.foeLabel) hud.foeLabel.textContent = foe.downTime > 0 ? `${foe.label} — down` : foe.label;
   }
 
   function setHalfSword(on: boolean): void {
@@ -555,6 +715,9 @@ async function boot() {
     controls.enableZoom = !on;   // wheel = reach in Half Sword mode
     if (!on) halfSwordInput.release();
     document.documentElement.classList.toggle("half-sword", on);
+    // The controls hint fades back after a few seconds (hover to read).
+    hudHint?.classList.remove("dim");
+    if (on) setTimeout(() => { if (halfSword.enabled) hudHint?.classList.add("dim"); }, 7000);
     if (on) {
       // Over-the-shoulder camera behind the fighter.
       const player = playerId ? agents.get(playerId) : null;
@@ -564,16 +727,30 @@ async function boot() {
         camera.getWorldDirection(f).setY(0).normalize();
         hsHeading.copy(f);
         controls.target.set(px, py + 1.2, pz);
-        camera.position.set(px - f.x * 2.6, py + 1.75, pz - f.z * 2.6);
+        // Over the right shoulder so the opponent isn't hidden behind you.
+        const rx = -f.z, rz = f.x;   // character right = fwd × up
+        camera.position.set(px - f.x * 2.9 + rx * 0.9, py + 1.95, pz - f.z * 2.9 + rz * 0.9);
         controls.update();
       }
     }
     attachHalfSword();
+    // A wide, grounded stance suits fencing; restore the walk when leaving.
+    const pl = playerId ? agents.get(playerId) : null;
+    if (pl?.kind === "biped") pl.agent.setStyle(on ? "LegsApart" : "Neutral");
+    if (on && dummies.size === 0) spawnDummy();
     ui.pane.refresh();
   }
 
   function updateHalfSword(dt: number): void {
     const controls_ = halfSwordInput.consume();
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    if (me && me.downTime > 0) {
+      controls_.leftHeld = controls_.rightHeld = false;
+      controls_.dx = controls_.dy = 0;
+      if (me.agent.style !== "HandsBetweenLegs") me.agent.setStyle("HandsBetweenLegs");
+    } else if (me && halfSword.enabled && me.agent.style === "HandsBetweenLegs") {
+      me.agent.setStyle("LegsApart");
+    }
     const player = playerId ? agents.get(playerId) : null;
     if (!halfSword.enabled || player?.kind !== "biped") return;
     // Q / E turn the fighter (orbit the camera around them).
@@ -684,6 +861,7 @@ async function boot() {
   if (import.meta.env.DEV) {
     (window as unknown as { __vibezzz: unknown }).__vibezzz = {
       camera, controls, agents, get playerId() { return playerId; },
+      combat, combatStats, dummies,
     };
   }
 
@@ -699,7 +877,10 @@ async function boot() {
 
   function loop() {
     timer.update();
-    const dt = Math.min(timer.getDelta(), 0.1);
+    const realDt = Math.min(timer.getDelta(), 0.1);
+    // Hit-stop: a few frames of near-frozen simulation sell the impact.
+    if (hitStop > 0) hitStop -= realDt;
+    const dt = hitStop > 0 ? realDt * 0.06 : realDt;
     totalTime += dt;
 
     // Autopilot brains drive non-player agents; WASD drives the player.
@@ -708,16 +889,35 @@ async function boot() {
     }
     drivePlayer();
     updateHalfSword(dt);
+    const me = playerId ? combat.fighters.get(playerId) ?? null : null;
+    for (const d of dummies.values()) d.ai.update(dt, me);
+    for (const f of combat.fighters.values()) f.reactor.update(dt);
 
     bipedEngine.update(dt);
     quadrupedEngine.update(dt);
+    handleCombatEvents(combat.step(dt));
 
+    fx.removeShake(camera);
     cameraFollow();
-    sword.visible = halfSword.enabled && halfSword.swordVisible;
-    if (sword.visible) {
-      sword.position.copy(halfSword.swordPosition);
-      sword.quaternion.copy(halfSword.swordQuaternion);
-    }
+    fx.addShake(camera, realDt);
+    fx.update(realDt);
+
+    // Sword meshes + trails follow the simulated grips.
+    const g = new THREE.Vector3(), tp = new THREE.Vector3();
+    const showSword = (mesh: THREE.Group, hs: HalfSword, trail: BladeTrail, key: string) => {
+      mesh.visible = hs.enabled && hs.swordVisible;
+      if (!mesh.visible) { trail.push(g, tp, 0, false, realDt); return; }
+      mesh.position.copy(hs.swordPosition);
+      mesh.quaternion.copy(hs.swordQuaternion);
+      hs.bladeSegment(g, tp);
+      const speed = hs.tipVelocity().length();
+      trail.push(g, tp, speed, true, realDt);
+      sfx.whoosh(key, speed);
+    };
+    showSword(sword, halfSword, playerTrail, "player");
+    for (const d of dummies.values()) showSword(d.mesh, d.sword, d.trail, d.id);
+    updateHud();
+    if (bannerTimer > 0) bannerTimer -= realDt;
     renderer.render(scene, camera);
     ui.tickStats();
 

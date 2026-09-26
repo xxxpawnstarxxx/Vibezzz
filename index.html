@@ -129,6 +129,57 @@
         .tp-dfwv, .stats-gl, #wasd-hint { display: none !important; }
       }
 
+      /* Combat HUD — health bars, damage popups, hit vignette, banner. */
+      #combat-hud {
+        position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+        display: none; gap: 18px; z-index: 40; pointer-events: none;
+        font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #cfd4dc;
+      }
+      html.half-sword #combat-hud { display: flex; }
+      #combat-hud .bar { width: min(260px, 38vw); }
+      #combat-hud .track {
+        height: 8px; margin-top: 4px; border-radius: 2px; overflow: hidden;
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+      }
+      #combat-hud .fill { height: 100%; width: 100%; transition: width 0.18s ease-out; }
+      #hp-you { background: linear-gradient(90deg, #7fb069, #b7d67a); }
+      #hp-foe { background: linear-gradient(90deg, #c2412d, #e08a4c); margin-left: auto; }
+      #combat-hud .foe { text-align: right; visibility: hidden; }
+      #combat-hud.has-foe .foe { visibility: visible; }
+      #dmg-layer { position: fixed; inset: 0; pointer-events: none; z-index: 45; overflow: hidden; }
+      .dmg {
+        position: absolute; transform: translate(-50%, -50%);
+        font-weight: 700; font-size: 15px; color: #f4f1ea;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+        animation: dmg-rise 0.9s ease-out forwards; white-space: nowrap;
+      }
+      .dmg.crit { color: #ffcf5a; font-size: 18px; }
+      .dmg.taken { color: #ff6b5a; }
+      .dmg.parry { color: #bfe3ff; font-size: 12px; letter-spacing: 0.12em; }
+      @keyframes dmg-rise {
+        0% { opacity: 0; transform: translate(-50%, -30%) scale(0.8); }
+        15% { opacity: 1; transform: translate(-50%, -60%) scale(1.1); }
+        100% { opacity: 0; transform: translate(-50%, -190%) scale(1); }
+      }
+      #hit-vignette {
+        position: fixed; inset: 0; pointer-events: none; z-index: 44; opacity: 0;
+        background: radial-gradient(ellipse at center, transparent 55%, rgba(170, 10, 10, 0.55) 100%);
+      }
+      #hit-vignette.flash { animation: vignette 0.5s ease-out; }
+      @keyframes vignette { 0% { opacity: 1; } 100% { opacity: 0; } }
+      #combat-banner {
+        position: fixed; top: 30%; left: 50%; transform: translate(-50%, -50%);
+        pointer-events: none; z-index: 46; opacity: 0;
+        font-size: clamp(22px, 5vw, 44px); font-weight: 700; letter-spacing: 0.2em;
+        color: #f2c46d; text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+      }
+      #combat-banner.show { animation: banner 2s ease-out forwards; }
+      @keyframes banner {
+        0% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
+        12% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        75% { opacity: 1; }
+        100% { opacity: 0; }
+      }
       /* Half Sword HUD — only while the mode is on. */
       #hs-hint {
         position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
@@ -139,6 +190,9 @@
         max-width: calc(100vw - 32px);
       }
       html.half-sword #hs-hint { display: block; }
+      #hs-hint { transition: opacity 0.6s; }
+      #hs-hint.dim { opacity: 0.28; }
+      @media (pointer: fine) { html.half-sword .joystick-base { display: none !important; } }
       html.half-sword #wasd-hint { display: none; }
       #hs-hint .grip { color: #f2c46d; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
       #hs-hint kbd {
@@ -262,10 +316,18 @@
       </div>
     </div>
     <button id="credit-btn" type="button" aria-label="Credits">i</button>
+    <div id="combat-hud">
+      <div class="bar you">You<div class="track"><div class="fill" id="hp-you"></div></div></div>
+      <div class="bar foe"><span id="hp-foe-label">Dummy</span><div class="track"><div class="fill" id="hp-foe"></div></div></div>
+    </div>
+    <div id="dmg-layer"></div>
+    <div id="hit-vignette"></div>
+    <div id="combat-banner"></div>
     <div id="hs-hint">
       <div class="grip">right hand sword · relaxed</div>
       <div><kbd>RMB</kbd> right hand · <kbd>LMB</kbd> left hand · both = two-handed · mouse moves the hand · <kbd>wheel</kbd> reach</div>
       <div><kbd>G</kbd> half-sword grip · <kbd>X</kbd> swap hands · <kbd>Q</kbd>/<kbd>E</kbd> turn · <kbd>WASD</kbd> step · <kbd>H</kbd> exit</div>
+      <div>Sparring dummy: cut fast to land hits · put your blade in its way to parry · tune it under Half Sword → Sparring dummy</div>
     </div>
     <div id="credit-popup" class="hidden" role="dialog" aria-label="Credits">
       <div class="title">Built on AI4AnimationPy</div>

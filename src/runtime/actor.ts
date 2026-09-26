@@ -159,6 +159,10 @@ export class Actor {
   /** `boneInverses[skelIdx]` per skeleton bone — shared template data. */
   private boneInverses: readonly THREE.Matrix4[] = [];
 
+  /** World matrices of every skeleton bone as last written to the GPU
+   *  (valid after the first writeBoneMatrices). Read-only for callers. */
+  get worldMatrices(): readonly THREE.Matrix4[] { return this.scratchWorld; }
+
   /** Optional per-agent pose override, run on the full skeleton's world
    *  matrices after the cascade and before driven joints (e.g. the Half
    *  Sword arm IK + grip for the player). */

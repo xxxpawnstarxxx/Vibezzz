@@ -84,6 +84,8 @@ export interface UIOptions {
     settings: { sensitivity: number; bladeWeight: number };
     onToggle: (on: boolean) => void;
     onSwapHands: () => void;
+    dummy: { aggression: number; blockSkill: number; fightsBack: boolean; power: number };
+    onSpawnDummy: () => void;
   };
   /** Exposure / environment / skin shading controls. */
   look?: {
@@ -247,6 +249,12 @@ export class UI {
     (folder.addButton({ title: "Swap sword hand [X]" }) as ButtonApi).on("click", () => h.onSwapHands());
     folder.addBinding(h.settings, "sensitivity", { min: 0.0005, max: 0.006, step: 0.0001 });
     folder.addBinding(h.settings, "bladeWeight", { label: "blade weight", min: 0.2, max: 3, step: 0.05 });
+    const d = folder.addFolder({ title: "Sparring dummy", expanded: true });
+    (d.addButton({ title: "Spawn dummy" }) as ButtonApi).on("click", () => h.onSpawnDummy());
+    d.addBinding(h.dummy, "fightsBack", { label: "fights back" });
+    d.addBinding(h.dummy, "aggression", { min: 0, max: 1, step: 0.05 });
+    d.addBinding(h.dummy, "blockSkill", { label: "block skill", min: 0, max: 1, step: 0.05 });
+    d.addBinding(h.dummy, "power", { label: "hit power", min: 0.1, max: 1.5, step: 0.05 });
   }
 
   private buildLookFolder(l: NonNullable<UIOptions["look"]>): void {

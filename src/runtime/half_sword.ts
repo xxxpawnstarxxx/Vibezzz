@@ -201,6 +201,8 @@ export class HalfSword {
   private blade = new THREE.Vector3(0, 1, 0);
   private simReady = false;
   private twoHanded = false;
+  /** Last physics substep length (for velocity ↔ Verlet conversions). */
+  private lastH = 1 / 240;
 
   constructor(private readonly rig: RigInfo) {
     this.arms = { Left: buildArm(rig, "Left"), Right: buildArm(rig, "Right") };
@@ -214,6 +216,32 @@ export class HalfSword {
   }
 
   get offSide(): HandSide { return this.mainSide === "Right" ? "Left" : "Right"; }
+
+  // --- read-only views for combat / AI -----------------------------------
+  get ready(): boolean { return this.enabled && this.simReady && this.haveBody; }
+  get isTwoHanded(): boolean { return this.twoHanded; }
+  get chestPosition(): THREE.Vector3 { return this.chest; }
+  get bodyForward(): THREE.Vector3 { return this.fwd; }
+  get bodyRight(): THREE.Vector3 { return this.right; }
+  /** Mutable mouse-space target of a hand (x right, y up from chest, z fwd). */
+  handOffset(side: HandSide): THREE.Vector3 { return this.hands[side].offset; }
+  /** Simulated tip velocity (m/s). */
+  tipVelocity(out = new THREE.Vector3()): THREE.Vector3 {
+    return out.copy(this.tip).sub(this.tipPrev).divideScalar(this.lastH);
+  }
+  gripVelocity(out = new THREE.Vector3()): THREE.Vector3 { return out.copy(this.gripVel); }
+  /** Rendered blade segment (crossguard → tip), world space. */
+  bladeSegment(guard: THREE.Vector3, tip: THREE.Vector3): void {
+    const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(this.swordQuaternion);
+    guard.copy(this.swordPosition).addScaledVector(dir, 0.07);
+    tip.copy(this.swordPosition).addScaledVector(dir, SWORD.bladeLength);
+  }
+  /** Change the tip's velocity by `dv` (m/s) — contact response. */
+  impulseTip(dv: THREE.Vector3): void { this.tipPrev.addScaledVector(dv, -this.lastH); }
+  /** Move the tip without changing its velocity (penetration fix-up). */
+  pushTip(delta: THREE.Vector3): void { this.tip.add(delta); this.tipPrev.add(delta); }
+  /** Knock the grip (e.g. a heavy parry jars the hands). */
+  impulseGrip(dv: THREE.Vector3): void { this.gripVel.add(dv); }
 
   /** Move the sword to the other hand. */
   swapHands(): void {
@@ -242,6 +270,7 @@ export class HalfSword {
   update(dt: number, c: HalfSwordControls): void {
     if (!this.enabled || !this.haveBody) return;
     dt = Math.min(dt, 1 / 20);
+    if (dt <= 1e-5) return;   // hit-stop freeze
     const main = this.mainSide, off = this.offSide;
     const held: Record<HandSide, boolean> = { Left: c.leftHeld, Right: c.rightHeld };
     const two = held.Left && held.Right;
@@ -309,6 +338,7 @@ export class HalfSword {
     const wrist = two ? 80 : active ? 38 : 14;
     const g = 9.81 * 0.4 * this.settings.bladeWeight;
     const steps = 4, h = dt / steps;
+    this.lastH = h;
     const acc = new THREE.Vector3(), tmp = new THREE.Vector3();
     for (let i = 0; i < steps; i++) {
       // Grip: critically damped spring toward the hand target.

@@ -65,6 +65,36 @@ The sword is simulated, not animated (`src/runtime/half_sword.ts`):
 - The gripping hand rotates to follow the blade, and the fingers curl into a fist around the handle.
 - An idle sword hand sags back to a low guard.
 
+### Combat and the sparring dummy
+
+Turning Half Sword mode on also spawns a **sparring dummy** in front of you. You can add more with **Half Sword → Sparring dummy → Spawn dummy**. The dummy uses the same simulated sword as you, so its cuts carry the same momentum. It follows a simple cycle:
+
+- keeps its distance and circles you
+- winds up a cut (from the right, from the left, or overhead) or a half-sword thrust, then strikes
+- reads a fast incoming blade and puts its sword in the way
+- staggers back when hit
+- goes down when its health runs out, then recovers
+
+You can tune its aggression, block skill and hit power, or turn "fights back" off to get a passive target.
+
+**Collision** (`src/runtime/combat.ts`):
+
+- Each biped has capsules for the head, neck, torso, arms and legs, rebuilt every frame from the pose sent to the GPU.
+- Blades are tested against other blades and against bodies. The tests sweep from the previous frame, so a fast cut can't pass through. The blade stops where it bit, then bounces or deflects.
+- Blade-on-blade contact exchanges momentum, which gives you parries and binds.
+- Damage depends on the blade's speed at the contact point and where it hit: head > neck > torso > legs > arms. Tip-first contacts moving along the blade count as thrusts.
+- A hit target flinches: a spring bends the spine and neck away from the blow, then wobbles back.
+
+**Feedback:**
+
+- hit-stop (a brief near-freeze) on impact, and camera shake when you're involved
+- spark streaks and a flash on parries; droplets that splash and stay on the floor on body hits
+- faint trails on fast swings, measured in time rather than frames
+- damage numbers (HEAD / NECK / THRUST), health bars, a red vignette when you're hit, a "down" banner
+- synthesized sound (Web Audio): steel clang, body impact, swing whoosh
+
+Body language comes from the network's styles: a wide `LegsApart` fencing stance, a `DragLeftLeg` limp when badly hurt, and `HandsBetweenLegs` when down.
+
 The pointer is locked while you hold a button (**Esc** releases it). Add `?nolock` to the URL to keep the cursor free.
 
 ## Run
