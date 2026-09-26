@@ -42,6 +42,31 @@ The network predicts 23 joints. Every other joint normally rides rigidly on its 
 - **twist**: splits the hand's roll relative to the forearm into a swing and a twist, and applies part of the twist to a forearm helper joint, which stops the wrist from candy-wrapping
 - **follow**: moves `Neck1` halfway toward the head, so the neck bends over two joints instead of one crease
 
+## Half Sword mode
+
+Press **H** (or tick **Half Sword → enabled**) to fight Half Sword-style. The network keeps doing the footwork, and your mouse takes over the hands:
+
+| Input | Effect |
+| --- | --- |
+| Hold **RMB** + move mouse | Right hand (sword hand) follows the mouse |
+| Hold **LMB** + move mouse | Left hand follows the mouse |
+| Hold **both** | Two-handed grip: the off hand closes on the handle, and the blade is steadier and faster to steer |
+| **G** while two-handed | Half-sword grip: the off hand moves to the middle of the blade and the blade levels forward along the thrust line |
+| **Wheel** | Reach in / out |
+| **X** | Swap the sword to the other hand |
+| **Q / E** | Turn. The fighter keeps its own heading, so orbiting the camera with MMB doesn't turn it |
+| **WASD** | Step and move |
+
+The sword is simulated, not animated (`src/runtime/half_sword.ts`):
+
+- The grip chases the hand target through a damped spring, so the weapon lags and carries momentum.
+- The tip is a Verlet particle held at blade length, pulled by gravity and a wrist spring toward the guard. Fast hand movement whips the blade through a cut.
+- Each arm is placed with two-bone IK. About a third of the lift goes to the clavicle.
+- The gripping hand rotates to follow the blade, and the fingers curl into a fist around the handle.
+- An idle sword hand sags back to a low guard.
+
+The pointer is locked while you hold a button (**Esc** releases it). Add `?nolock` to the URL to keep the cursor free.
+
 ## Run
 
 ```bash

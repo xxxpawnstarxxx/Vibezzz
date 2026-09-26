@@ -129,6 +129,22 @@
         .tp-dfwv, .stats-gl, #wasd-hint { display: none !important; }
       }
 
+      /* Half Sword HUD — only while the mode is on. */
+      #hs-hint {
+        position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+        display: none; z-index: 40; pointer-events: none;
+        padding: 8px 14px; border-radius: 8px;
+        background: rgba(12, 12, 14, 0.78); border: 1px solid rgba(255,255,255,0.14);
+        font-size: 12px; line-height: 1.5; color: #d9dde4; text-align: center;
+        max-width: calc(100vw - 32px);
+      }
+      html.half-sword #hs-hint { display: block; }
+      html.half-sword #wasd-hint { display: none; }
+      #hs-hint .grip { color: #f2c46d; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+      #hs-hint kbd {
+        padding: 0 4px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.25);
+        font-family: inherit; font-size: 11px;
+      }
       /* Credit button — small "i" icon in the bottom-right corner. Tapping
          opens a popup with attribution to the upstream authors and license
          note. Sits below the right joystick on mobile (joystick sits at
@@ -246,6 +262,11 @@
       </div>
     </div>
     <button id="credit-btn" type="button" aria-label="Credits">i</button>
+    <div id="hs-hint">
+      <div class="grip">right hand sword · relaxed</div>
+      <div><kbd>RMB</kbd> right hand · <kbd>LMB</kbd> left hand · both = two-handed · mouse moves the hand · <kbd>wheel</kbd> reach</div>
+      <div><kbd>G</kbd> half-sword grip · <kbd>X</kbd> swap hands · <kbd>Q</kbd>/<kbd>E</kbd> turn · <kbd>WASD</kbd> step · <kbd>H</kbd> exit</div>
+    </div>
     <div id="credit-popup" class="hidden" role="dialog" aria-label="Credits">
       <div class="title">Built on AI4AnimationPy</div>
       <ul>

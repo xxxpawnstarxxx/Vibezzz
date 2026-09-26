@@ -78,6 +78,13 @@ export interface UIOptions {
     options: Record<string, string>;
     onChange: (id: string) => void;
   };
+  /** Half Sword mode (mouse-driven hands + sword). */
+  halfSword?: {
+    state: { enabled: boolean; halfGrip: boolean };
+    settings: { sensitivity: number; bladeWeight: number };
+    onToggle: (on: boolean) => void;
+    onSwapHands: () => void;
+  };
   /** Exposure / environment / skin shading controls. */
   look?: {
     params: LookParams;
@@ -226,9 +233,20 @@ export class UI {
     (camFolder.addButton({ title: "Reset Camera" }) as ButtonApi)
       .on("click", () => opts.onResetCamera());
 
+    if (opts.halfSword) this.buildHalfSwordFolder(opts.halfSword);
     if (opts.look) this.buildLookFolder(opts.look);
     if (opts.directional) this.buildDirectionalFolder(opts.directional);
     if (opts.studio) this.buildStudioFolder(opts.studio);
+  }
+
+  private buildHalfSwordFolder(h: NonNullable<UIOptions["halfSword"]>): void {
+    const folder = this.pane.addFolder({ title: "Half Sword", expanded: true });
+    (folder.addBinding(h.state, "enabled", { label: "enabled [H]" }) as BindingApi<boolean>)
+      .on("change", (ev) => { if (ev.value !== undefined) h.onToggle(Boolean(ev.value)); });
+    folder.addBinding(h.state, "halfGrip", { label: "half-sword [G]" });
+    (folder.addButton({ title: "Swap sword hand [X]" }) as ButtonApi).on("click", () => h.onSwapHands());
+    folder.addBinding(h.settings, "sensitivity", { min: 0.0005, max: 0.006, step: 0.0001 });
+    folder.addBinding(h.settings, "bladeWeight", { label: "blade weight", min: 0.2, max: 3, step: 0.05 });
   }
 
   private buildLookFolder(l: NonNullable<UIOptions["look"]>): void {

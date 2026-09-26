@@ -159,6 +159,11 @@ export class Actor {
   /** `boneInverses[skelIdx]` per skeleton bone — shared template data. */
   private boneInverses: readonly THREE.Matrix4[] = [];
 
+  /** Optional per-agent pose override, run on the full skeleton's world
+   *  matrices after the cascade and before driven joints (e.g. the Half
+   *  Sword arm IK + grip for the player). */
+  poseOverride: ((world: THREE.Matrix4[]) => void) | null = null;
+
   /** Corrective twist / follow joints — shared template data. */
   private drivenJoints: readonly DrivenJoint[] = [];
 
@@ -204,6 +209,9 @@ export class Actor {
         dst.multiplyMatrices(world[entry.parentSkelIdx], bindLocals[entry.skelIdx]);
       }
     }
+
+    // Phase 2a: gameplay pose override (player arms / grip).
+    if (this.poseOverride) this.poseOverride(world);
 
     // Phase 2b: driven (corrective) joints — rotate helper joints from the
     // pose just computed (RigLogic-style twist / follow behaviours).

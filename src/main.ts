@@ -20,6 +20,9 @@ import type { SkinUniforms } from "./render/skin.js";
 import { Input } from "./input.js";
 import { Touch } from "./touch.js";
 import { GamepadInput, PAD } from "./gamepad.js";
+import { HalfSword } from "./runtime/half_sword.js";
+import { HalfSwordInput } from "./half_sword_input.js";
+import { createSword } from "./render/sword.js";
 import { Debug } from "./render/debug.js";
 import { UI } from "./render/ui.js";
 import type { DirectionalLightParams, LookParams } from "./render/ui.js";
@@ -113,6 +116,17 @@ async function boot() {
   scene.add(bipedEngine.mesh);
   scene.add(quadrupedEngine.mesh);
 
+  // Half Sword mode: mouse-driven hands + a simulated sword for the biped
+  // player; the network keeps doing the locomotion underneath.
+  const halfSword = new HalfSword(bipedEngine.rig);
+  const halfSwordInput = new HalfSwordInput(canvas);
+  const sword = createSword();
+  scene.add(sword);
+  const hsState = { enabled: false, halfGrip: false };
+  /** Fighter heading in Half Sword mode — turned with Q / E; orbiting the
+   *  camera (MMB) doesn't turn the fighter. */
+  const hsHeading = new THREE.Vector3(0, 0, 1);
+
   // Image-based fill light — skin, eyes and the clearcoat oil film need
   // something to reflect. The visible background stays the dark studio.
   const lookParams: LookParams = {
@@ -176,7 +190,7 @@ async function boot() {
   canvas.addEventListener("pointerup", (e) => {
     const s = tapStart;
     tapStart = null;
-    if (!s || s.id !== e.pointerId) return;
+    if (!s || s.id !== e.pointerId || halfSword.enabled) return;
     if (Math.hypot(e.clientX - s.x, e.clientY - s.y) > 6 || e.timeStamp - s.t > 350) return;
     const hit = pickAgent(e.clientX, e.clientY);
     if (hit && hit !== playerId) {
@@ -352,6 +366,12 @@ async function boot() {
         location.href = url.toString();
       },
     },
+    halfSword: {
+      state: hsState,
+      settings: halfSword.settings,
+      onToggle: (on) => { if (on !== halfSword.enabled) setHalfSword(on); },
+      onSwapHands: () => halfSword.swapHands(),
+    },
     look: {
       params: lookParams,
       skin: character === "human",
@@ -472,6 +492,7 @@ async function boot() {
     if (prev && prev.id !== next?.id) prev.brain = makeBrain(prev.kind, prev.agent);
     if (next) next.brain = null;
     playerId = next?.id ?? null;
+    attachHalfSword();
 
     // Retarget debug overlays to the new player's actor (or dispose if none).
     if (debug) { debug.dispose(); debug = null; }
@@ -512,6 +533,80 @@ async function boot() {
     setPlayer(next);
   }
 
+  // --- Half Sword --------------------------------------------------------
+  const hudHint = document.getElementById("hs-hint");
+
+  /** Hook the sword arms onto the current biped player only. */
+  function attachHalfSword(): void {
+    for (const r of agents.values()) {
+      if (r.kind === "biped") r.agent.actor.poseOverride = null;
+    }
+    halfSword.reset();
+    const player = playerId ? agents.get(playerId) : null;
+    if (halfSword.enabled && player?.kind === "biped") {
+      player.agent.actor.poseOverride = halfSword.apply;
+    }
+  }
+
+  function setHalfSword(on: boolean): void {
+    halfSword.enabled = on;
+    halfSwordInput.enabled = on;
+    hsState.enabled = on;
+    controls.enableZoom = !on;   // wheel = reach in Half Sword mode
+    if (!on) halfSwordInput.release();
+    document.documentElement.classList.toggle("half-sword", on);
+    if (on) {
+      // Over-the-shoulder camera behind the fighter.
+      const player = playerId ? agents.get(playerId) : null;
+      if (player?.kind === "biped") {
+        const [px, py, pz] = player.agent.getPosition();
+        const f = new THREE.Vector3();
+        camera.getWorldDirection(f).setY(0).normalize();
+        hsHeading.copy(f);
+        controls.target.set(px, py + 1.2, pz);
+        camera.position.set(px - f.x * 2.6, py + 1.75, pz - f.z * 2.6);
+        controls.update();
+      }
+    }
+    attachHalfSword();
+    ui.pane.refresh();
+  }
+
+  function updateHalfSword(dt: number): void {
+    const controls_ = halfSwordInput.consume();
+    const player = playerId ? agents.get(playerId) : null;
+    if (!halfSword.enabled || player?.kind !== "biped") return;
+    // Q / E turn the fighter (orbit the camera around them).
+    const turn = (input.keys.has("e") ? 1 : 0) - (input.keys.has("q") ? 1 : 0);
+    if (turn !== 0) {
+      const yaw = -turn * 1.8 * dt;
+      hsHeading.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+      const off = camera.position.clone().sub(controls.target);
+      off.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+      camera.position.copy(controls.target).add(off);
+      controls.update();
+    }
+    halfSword.halfGrip = hsState.halfGrip;
+    halfSword.update(dt, controls_);
+    if (hudHint) {
+      const two = controls_.leftHeld && controls_.rightHeld;
+      hudHint.dataset.grip = two ? (halfSword.halfGrip ? "half-sword" : "two-handed")
+        : controls_.leftHeld || controls_.rightHeld ? "one hand" : "relaxed";
+      hudHint.querySelector(".grip")!.textContent =
+        `${halfSword.mainSide.toLowerCase()} hand sword · ${hudHint.dataset.grip}`;
+    }
+  }
+
+  window.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA"
+      || t.tagName === "SELECT" || t.isContentEditable)) return;
+    const k = e.key.toLowerCase();
+    if (k === "h") setHalfSword(!halfSword.enabled);
+    else if (halfSword.enabled && k === "x") halfSword.swapHands();
+    else if (halfSword.enabled && k === "g") { hsState.halfGrip = !hsState.halfGrip; ui.pane.refresh(); }
+  });
+
   // --- Input routing ---------------------------------------------------
   const _camFwd = new THREE.Vector3();
   const _camRight = new THREE.Vector3();
@@ -547,13 +642,16 @@ async function boot() {
         (mz * fwd[2] + mx * right[2]) * SPEED,
       ];
       const vel = V.clampMagnitude(rawVel, SPEED);
-      const facing: Vec3 = [
-        fz * fwd[0] + fx * right[0], 0,
-        fz * fwd[2] + fx * right[2],
-      ];
+      const facing: Vec3 = halfSword.enabled
+        // Half Sword: the fighter squares up to where the camera looks.
+        ? [hsHeading.x, 0, hsHeading.z]
+        : [fz * fwd[0] + fx * right[0], 0, fz * fwd[2] + fx * right[2]];
       player.agent.setGoal(vel, facing);
-      if (input.consumeStylePrev()) cycleStyle(player, -1);
-      if (input.consumeStyleNext()) cycleStyle(player, +1);
+      const prevStyle = input.consumeStylePrev(), nextStyle = input.consumeStyleNext();
+      if (!halfSword.enabled) {
+        if (prevStyle) cycleStyle(player, -1);
+        if (nextStyle) cycleStyle(player, +1);
+      }
     } else {
       const moveLen = Math.hypot(mx, mz);
       const moveDir: Vec3 = moveLen > 1e-5
@@ -609,11 +707,17 @@ async function boot() {
       if (r.brain) r.brain.update(dt, totalTime);
     }
     drivePlayer();
+    updateHalfSword(dt);
 
     bipedEngine.update(dt);
     quadrupedEngine.update(dt);
 
     cameraFollow();
+    sword.visible = halfSword.enabled && halfSword.swordVisible;
+    if (sword.visible) {
+      sword.position.copy(halfSword.swordPosition);
+      sword.quaternion.copy(halfSword.swordQuaternion);
+    }
     renderer.render(scene, camera);
     ui.tickStats();
 
