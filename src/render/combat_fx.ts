@@ -153,7 +153,7 @@ export class CombatFx {
       new THREE.MeshBasicMaterial({ color: new THREE.Color(2.5, 2.2, 1.6), blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, toneMapped: false }),
       8, { gravity: 0, drag: 0, stretch: false, stick: false });
     this.drops = new ParticlePool(
-      new THREE.SphereGeometry(0.007, 6, 4),
+      new THREE.SphereGeometry(0.0055, 6, 4),
       new THREE.MeshStandardMaterial({ color: 0x3b0303, roughness: 0.55, metalness: 0, envMapIntensity: 0.25 }),
       220, { gravity: 9.8, drag: 0.6, stretch: false, stick: true });
     this.group.add(this.sparks.mesh, this.glints.mesh, this.drops.mesh);

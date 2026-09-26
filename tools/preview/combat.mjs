@@ -30,13 +30,26 @@ console.log('start', await state());
 await p.mouse.move(500, 350);
 await p.mouse.down({ button: 'right' });
 await p.mouse.down({ button: 'left' });
+const cuts = [
+  // [windup dx, dy] then [strike dx, dy] in pixels: diagonal, rising, overhead, horizontal
+  [[120, -260], [-260, 420]],
+  [[140, 200], [-240, -380]],
+  [[0, -300], [0, 460]],
+  [[200, -40], [-420, 20]],
+];
 for (let k = 0; k < 6; k++) {
-  // Wind up high-right then cut down-left, fast.
-  for (let i = 0; i < 4; i++) { await p.mouse.move(500 + i * 25, 350 - i * 35); await p.waitForTimeout(60); }
-  await p.waitForTimeout(400);
-  for (let i = 0; i < 3; i++) { await p.mouse.move(575 - i * 90, 245 + i * 110); await p.waitForTimeout(40); }
+  const [[wx, wy], [sx, sy]] = cuts[k % cuts.length];
+  let x = 500, y = 350;
+  for (let i = 1; i <= 4; i++) { await p.mouse.move(x + wx * i / 4, y + wy * i / 4); await p.waitForTimeout(60); }
+  x += wx; y += wy;
+  await p.waitForTimeout(350);
+  for (let i = 1; i <= 3; i++) { await p.mouse.move(x + sx * i / 3, y + sy * i / 3); await p.waitForTimeout(40); }
+  x += sx; y += sy;
   if (k === 1 || k === 4) await shot(`swing${k}`);
-  await p.waitForTimeout(700);
+  if (k === 5) { await p.keyboard.down('Space'); await p.waitForTimeout(500); await shot('thrust'); await p.keyboard.up('Space'); }
+  await p.waitForTimeout(600);
+  // Return the hands to the middle.
+  for (let i = 1; i <= 3; i++) { await p.mouse.move(x - (wx + sx) * i / 3, y - (wy + sy) * i / 3); await p.waitForTimeout(60); }
   await p.mouse.move(500, 350);
 }
 await p.waitForTimeout(1500);

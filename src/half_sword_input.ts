@@ -8,6 +8,7 @@ export class HalfSwordInput {
   enabled = false;
   leftHeld = false;
   rightHeld = false;
+  thrustHeld = false;
   private dx = 0;
   private dy = 0;
   private wheel = 0;
@@ -32,12 +33,21 @@ export class HalfSwordInput {
       this.dx += Math.max(-120, Math.min(120, e.movementX));
       this.dy += Math.max(-120, Math.min(120, e.movementY));
     });
+    // Space = thrust.
+    window.addEventListener("keydown", (e) => {
+      if (!this.enabled || e.code !== "Space") return;
+      const t = e.target;
+      if (t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      this.thrustHeld = true;
+    });
+    window.addEventListener("keyup", (e) => { if (e.code === "Space") this.thrustHeld = false; });
     canvas.addEventListener("wheel", (e) => {
       if (!this.enabled) return;
       e.preventDefault();
       this.wheel += e.deltaY;
     }, { passive: false });
-    window.addEventListener("blur", () => { this.leftHeld = false; this.rightHeld = false; });
+    window.addEventListener("blur", () => { this.leftHeld = false; this.rightHeld = false; this.thrustHeld = false; });
   }
 
   get locked(): boolean { return document.pointerLockElement === this.canvas; }
@@ -56,7 +66,7 @@ export class HalfSwordInput {
 
   release(): void {
     if (this.locked) document.exitPointerLock();
-    this.leftHeld = this.rightHeld = false;
+    this.leftHeld = this.rightHeld = this.thrustHeld = false;
     this.dx = this.dy = this.wheel = 0;
   }
 
@@ -64,7 +74,7 @@ export class HalfSwordInput {
   consume(): HalfSwordControls {
     const c: HalfSwordControls = {
       dx: this.dx, dy: this.dy, wheel: this.wheel,
-      leftHeld: this.leftHeld, rightHeld: this.rightHeld,
+      leftHeld: this.leftHeld, rightHeld: this.rightHeld, thrust: this.thrustHeld,
     };
     this.dx = this.dy = this.wheel = 0;
     return c;

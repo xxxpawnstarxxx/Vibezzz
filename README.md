@@ -52,16 +52,25 @@ Press **H** (or tick **Half Sword → enabled**) to fight Half Sword-style. The 
 | Hold **LMB** + move mouse | Left hand follows the mouse |
 | Hold **both** | Two-handed grip: the off hand closes on the handle, and the blade is steadier and faster to steer |
 | **G** while two-handed | Half-sword grip: the off hand moves to the middle of the blade and the blade levels forward along the thrust line |
+| **Space** | Thrust: drive the point straight out along the centreline |
 | **Wheel** | Reach in / out |
 | **X** | Swap the sword to the other hand |
 | **Q / E** | Turn. The fighter keeps its own heading, so orbiting the camera with MMB doesn't turn it |
 | **WASD** | Step and move |
 
+**Where your hands go decides the cut.** The blade points from a pivot low in your torso out through your hands, and it leans into the direction the hands are moving:
+
+- Hands high: the blade chambers above your head.
+- Hands high to one side: a diagonal chamber.
+- Hands low and forward: the point is on line.
+
+Sweep from high-right to low-left for a diagonal, from low to high for a rising cut, or across for a horizontal. Hold Space to thrust. Taking hold of the sword brings it up to a middle guard.
+
 The sword is simulated, not animated (`src/runtime/half_sword.ts`):
 
 - The grip chases the hand target through a damped spring, so the weapon lags and carries momentum.
 - The tip is a Verlet particle held at blade length, pulled by gravity and a wrist spring toward the guard. Fast hand movement whips the blade through a cut.
-- Each arm is placed with two-bone IK. About a third of the lift goes to the clavicle.
+- Each arm is placed with two-bone IK that respects the elbow's real hinge axis (taken from the bind pose), with the elbow pointing down and slightly out. The upper arm can't twist and the elbow can't fold sideways. About a third of any lift goes to the clavicle.
 - The gripping hand rotates to follow the blade, and the fingers curl into a fist around the handle.
 - An idle sword hand sags back to a low guard.
 
@@ -70,7 +79,8 @@ The sword is simulated, not animated (`src/runtime/half_sword.ts`):
 Turning Half Sword mode on also spawns a **sparring dummy** in front of you. You can add more with **Half Sword → Sparring dummy → Spawn dummy**. The dummy uses the same simulated sword as you, so its cuts carry the same momentum. It follows a simple cycle:
 
 - keeps its distance and circles you
-- winds up a cut (from the right, from the left, or overhead) or a half-sword thrust, then strikes
+- winds up and strikes with eight attacks: diagonal cuts from either side, overhead, rising cuts from either side, horizontal, a thrust, and a half-sword thrust
+- strings cuts into combos (each cut flows into a natural follow-up) and sometimes feints (it shows one cut, then throws another)
 - reads a fast incoming blade and puts its sword in the way
 - staggers back when hit
 - goes down when its health runs out, then recovers

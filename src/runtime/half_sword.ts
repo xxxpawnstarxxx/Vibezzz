@@ -30,6 +30,8 @@ export interface HalfSwordControls {
   wheel: number;
   leftHeld: boolean;
   rightHeld: boolean;
+  /** Thrust held (Space): drive the point straight out along the centreline. */
+  thrust?: boolean;
 }
 
 export interface HalfSwordSettings {
@@ -53,6 +55,11 @@ interface ArmRig {
   clavicle: number;
   arm: number; fore: number; hand: number;
   upperLen: number; foreLen: number;
+  /** Bone directions (toward the child) and the elbow flexion hinge, each in
+   *  the bone's own local frame — lets the IK place the elbow so it only
+   *  ever bends about its anatomical hinge. */
+  upperDirL: THREE.Vector3; upperHingeL: THREE.Vector3;
+  foreDirL: THREE.Vector3; foreHingeL: THREE.Vector3;
   /** Hand-local axes: across the knuckles (index → pinky), wrist → knuckles,
    *  and the palm normal. */
   across: THREE.Vector3; forward: THREE.Vector3; palm: THREE.Vector3;
@@ -144,8 +151,20 @@ function buildArm(rig: RigInfo, side: HandSide): ArmRig {
 
   const toLocal = (v: THREE.Vector3) => v.clone().applyQuaternion(handRotInv).normalize();
   const acrossL = toLocal(across), forwardL = toLocal(forward), palmL = toLocal(palm);
+
+  // Elbow hinge: flexion brings the forearm forward from the (A-pose) bind,
+  // so the flexion axis is upperArmDir × forward.
+  const d1 = bp(fore).sub(bp(arm)).normalize();
+  const d2 = bp(hand).sub(bp(fore)).normalize();
+  const hingeW = new THREE.Vector3().crossVectors(d1, new THREE.Vector3(0, 0, 1)).normalize();
+  const armRotInv = rotOf(bindWorld(rig, arm)).invert();
+  const foreRotInv = rotOf(bindWorld(rig, fore)).invert();
   return {
     side, clavicle, arm, fore, hand,
+    upperDirL: d1.clone().applyQuaternion(armRotInv).normalize(),
+    upperHingeL: hingeW.clone().applyQuaternion(armRotInv).normalize(),
+    foreDirL: d2.clone().applyQuaternion(foreRotInv).normalize(),
+    foreHingeL: hingeW.clone().applyQuaternion(foreRotInv).normalize(),
     upperLen: bp(fore).distanceTo(bp(arm)),
     foreLen: bp(hand).distanceTo(bp(fore)),
     across: acrossL, forward: forwardL, palm: palmL,
@@ -201,6 +220,11 @@ export class HalfSword {
   private blade = new THREE.Vector3(0, 1, 0);
   private simReady = false;
   private twoHanded = false;
+  /** 0…1 blend of the thrust extension (eases in fast, out slower). */
+  private thrustAmt = 0;
+  /** Seconds left of the "come to guard" lift after grabbing the sword. */
+  private readyLift = 0;
+  private wasActive = false;
   /** Last physics substep length (for velocity ↔ Verlet conversions). */
   private lastH = 1 / 240;
 
@@ -297,6 +321,18 @@ export class HalfSword {
       const o = this.hands[main].offset;
       o.x += (side * (this.halfGrip ? 0.04 : 0.1) - o.x) * (1 - Math.exp(-dt * 3));
     }
+    // Taking hold of the sword brings it up to a middle guard (hands at
+    // chest height, forward) instead of starting a cut from the hip.
+    const activeNow = held[main] || two;
+    if (activeNow && !this.wasActive) this.readyLift = 0.35;
+    this.wasActive = activeNow;
+    if (this.readyLift > 0) {
+      this.readyLift -= dt;
+      const o = this.hands[main].offset;
+      const k = 1 - Math.exp(-dt * 12);
+      o.y += (Math.max(o.y, -0.02) - o.y) * k;
+      o.z += (Math.max(o.z, 0.38) - o.z) * k;
+    }
     // An idle sword hand sags back to a low guard.
     if (!held[main]) this.hands[main].offset.lerp(REST_MAIN.clone().setX(REST_MAIN.x * (main === "Right" ? 1 : -1)), 1 - Math.exp(-dt * 1.5));
 
@@ -319,23 +355,49 @@ export class HalfSword {
     if (fromSh.length() > reach) target.copy(this.shoulder[main]).addScaledVector(fromSh.normalize(), reach);
 
     const active = held[main] || two;
-    const guard = two && this.halfGrip
-      // Half-swording: blade levelled forward along the thrust line, the off
-      // hand steering it from the middle of the blade.
-      ? new THREE.Vector3().addScaledVector(this.fwd, 1).addScaledVector(UP, 0.12)
-        .addScaledVector(this.right, -mh.offset.x * 0.6).normalize()
-      : active
-      ? new THREE.Vector3().addScaledVector(UP, 0.85).addScaledVector(this.fwd, 0.75)
-        .addScaledVector(this.right, mh.offset.x * 1.6 - 0.15 * (main === "Right" ? -1 : 1)).normalize()
-      : new THREE.Vector3().addScaledVector(this.fwd, 0.85).addScaledVector(UP, -0.5).normalize();
+    const ease2 = (cur: number, tgt: number, rate: number) => cur + (tgt - cur) * (1 - Math.exp(-dt * rate));
+    this.thrustAmt = ease2(this.thrustAmt, active && c.thrust ? 1 : 0, active && c.thrust ? 14 : 7);
+
+    // Blade aim: the blade points from a pivot low in the torso out through
+    // the hands, so the hand path *is* the cut — hands high = chambered
+    // (vom Tag), high to one side = diagonal chamber, low & forward = point
+    // on line. Swinging the hands carries the blade through any angle.
+    const pivot = this.chest.clone().addScaledVector(UP, -0.38).addScaledVector(this.fwd, -0.28);
+    let guard: THREE.Vector3;
+    if (two && this.halfGrip) {
+      // Half-swording: blade levelled forward along the thrust line.
+      guard = new THREE.Vector3().addScaledVector(this.fwd, 1).addScaledVector(UP, 0.12)
+        .addScaledVector(this.right, -mh.offset.x * 0.6).normalize();
+    } else if (active) {
+      guard = target.clone().sub(pivot).addScaledVector(UP, 0.12).normalize();
+      // Lead: the blade leans into the direction the hands are moving, so a
+      // fast sweep rotates the edge into the cut instead of dragging flat.
+      const v = this.gripVel.clone();
+      v.addScaledVector(guard, -v.dot(guard));
+      const vl = v.length();
+      if (vl > 1e-3) guard.addScaledVector(v, Math.min(vl * 0.08, 0.45) / vl).normalize();
+    } else {
+      guard = new THREE.Vector3().addScaledVector(this.fwd, 0.85).addScaledVector(UP, -0.5).normalize();
+    }
+    if (this.thrustAmt > 1e-3) {
+      // Thrust: hands shoot forward to full reach on the centreline, point
+      // aimed straight ahead.
+      const side = main === "Right" ? 1 : -1;
+      const out = this.toWorld(new THREE.Vector3(side * 0.06, THREE.MathUtils.clamp(mh.offset.y, -0.25, 0.2), 0.78));
+      const fromSh2 = out.clone().sub(this.shoulder[main]);
+      if (fromSh2.length() > reach) out.copy(this.shoulder[main]).addScaledVector(fromSh2.normalize(), reach);
+      target.lerp(out, this.thrustAmt);
+      const aim = this.fwd.clone().addScaledVector(UP, 0.04).normalize();
+      guard.lerp(aim, this.thrustAmt).normalize();
+    }
     const L = SWORD.bladeLength;
     if (!this.simReady) {
       this.grip.copy(target); this.gripVel.set(0, 0, 0);
       this.tip.copy(target).addScaledVector(guard, L); this.tipPrev.copy(this.tip);
       this.simReady = true;
     }
-    const omega = two ? 24 : active ? 17 : 9;
-    const wrist = two ? 80 : active ? 38 : 14;
+    const omega = (two ? 24 : active ? 17 : 9) + this.thrustAmt * 10;
+    const wrist = (two ? 80 : active ? 38 : 14) + this.thrustAmt * 60;
     const g = 9.81 * 0.4 * this.settings.bladeWeight;
     const steps = 4, h = dt / steps;
     this.lastH = h;
@@ -427,33 +489,42 @@ export class HalfSword {
       }
     }
 
-    const pa = posOf(world[arm.arm]), pf = posOf(world[arm.fore]), ph = posOf(world[arm.hand]);
+    const pa = posOf(world[arm.arm]);
     const Ra = rotOf(world[arm.arm]), Rf = rotOf(world[arm.fore]), Rh = rotOf(world[arm.hand]);
     const L1 = arm.upperLen, L2 = arm.foreLen;
     const toT = target.clone().sub(pa);
     const d = THREE.MathUtils.clamp(toT.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
     const dir = toT.normalize();
+    // Elbow hint: down, a little out to the side and back — a relaxed
+    // fencer's elbow. Projected off the shoulder→hand line.
     const sideSign = arm.side === "Right" ? 1 : -1;
     const pole = new THREE.Vector3().addScaledVector(UP, -1)
-      .addScaledVector(this.right, 0.7 * sideSign).addScaledVector(this.fwd, -0.25);
-    pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      .addScaledVector(this.right, 0.3 * sideSign).addScaledVector(this.fwd, -0.15);
+    pole.addScaledVector(dir, -pole.dot(dir));
+    if (pole.lengthSq() < 1e-6) pole.copy(this.fwd).addScaledVector(dir, -this.fwd.dot(dir));
+    pole.normalize();
     const cosA = THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1);
     const elbow = pa.clone().addScaledVector(dir, L1 * cosA).addScaledVector(pole, L1 * Math.sqrt(1 - cosA * cosA));
     const hand = pa.clone().addScaledVector(dir, d);
 
-    const q1 = new THREE.Quaternion().setFromUnitVectors(pf.clone().sub(pa).normalize(), elbow.clone().sub(pa).normalize());
-    const foreAfter = ph.clone().sub(pf).applyQuaternion(q1).normalize();
-    const q2 = new THREE.Quaternion().setFromUnitVectors(foreAfter, hand.clone().sub(elbow).normalize());
-    const I = new THREE.Quaternion();
-    const q1w = I.clone().slerp(q1, hs.w), q2w = I.clone().slerp(q2, hs.w);
-    const q21 = q2w.clone().multiply(q1w);
+    // Absolute bone rotations: bone axis onto the solved segment, elbow
+    // hinge onto the bend plane's normal (pole × dir — stable even when the
+    // arm is straight). No roll is left to chance, so the elbow can't fold
+    // sideways and the upper arm doesn't corkscrew.
+    const hinge = new THREE.Vector3().crossVectors(pole, dir).normalize();
+    const RaIK = frameRotation(arm.upperDirL, arm.upperHingeL, elbow.clone().sub(pa), hinge);
+    const RfIK = frameRotation(arm.foreDirL, arm.foreHingeL, hand.clone().sub(elbow), hinge);
 
-    const newPf = pf.clone().sub(pa).applyQuaternion(q1w).add(pa);
-    const newPh = ph.clone().sub(pf).applyQuaternion(q21).add(newPf);
-    const newRh = q21.clone().multiply(Rh).slerp(handRot, hs.rotW);
+    const newRa = Ra.clone().slerp(RaIK, hs.w);
+    const newRf = Rf.clone().slerp(RfIK, hs.w);
+    const newPf = arm.upperDirL.clone().applyQuaternion(newRa).multiplyScalar(L1).add(pa);
+    const newPh = arm.foreDirL.clone().applyQuaternion(newRf).multiplyScalar(L2).add(newPf);
+    // The hand is carried by the forearm's change, then turned to the grip.
+    const carried = newRf.clone().multiply(Rf.clone().invert()).multiply(Rh);
+    const newRh = carried.slerp(handRot, hs.rotW);
     const one = new THREE.Vector3(1, 1, 1);
-    world[arm.arm].compose(pa, q1w.clone().multiply(Ra), one);
-    world[arm.fore].compose(newPf, q21.clone().multiply(Rf), one);
+    world[arm.arm].compose(pa, newRa, one);
+    world[arm.fore].compose(newPf, newRf, one);
     world[arm.hand].compose(newPh, newRh, one);
     this.curlFingers(world, arm, hs.curl);
   }

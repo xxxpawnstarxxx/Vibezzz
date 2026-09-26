@@ -745,7 +745,7 @@ async function boot() {
     const controls_ = halfSwordInput.consume();
     const me = playerId ? combat.fighters.get(playerId) : null;
     if (me && me.downTime > 0) {
-      controls_.leftHeld = controls_.rightHeld = false;
+      controls_.leftHeld = controls_.rightHeld = controls_.thrust = false;
       controls_.dx = controls_.dy = 0;
       if (me.agent.style !== "HandsBetweenLegs") me.agent.setStyle("HandsBetweenLegs");
     } else if (me && halfSword.enabled && me.agent.style === "HandsBetweenLegs") {

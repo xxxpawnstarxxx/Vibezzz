@@ -21,13 +21,28 @@ import type { Fighter } from "./combat.js";
 import type { Vec3 } from "../math/vec3.js";
 
 type State = "guard" | "windup" | "strike" | "recover" | "block" | "stagger" | "down";
-type Attack = "cutR" | "cutL" | "over" | "thrust";
+type Attack = "cutR" | "cutL" | "over" | "riseR" | "riseL" | "flatR" | "thrust" | "halfThrust";
 
-const ATTACKS: Record<Attack, { windup: [number, number, number]; strike: [number, number, number]; half: boolean }> = {
-  cutR:   { windup: [0.42, 0.42, 0.22],  strike: [-0.22, -0.3, 0.62], half: false },
-  cutL:   { windup: [-0.22, 0.45, 0.28], strike: [0.45, -0.28, 0.58], half: false },
-  over:   { windup: [0.08, 0.5, 0.12],   strike: [0.06, -0.3, 0.66],  half: false },
-  thrust: { windup: [0.06, -0.02, 0.1],  strike: [0.04, 0.05, 0.72],  half: true },
+/** Hand paths in the dummy's frame (x right, y up from chest, z forward).
+ *  With the pivot-based blade aim the path defines the cut's angle. */
+const ATTACKS: Record<Attack, { windup: [number, number, number]; strike: [number, number, number]; half?: boolean; thrust?: boolean }> = {
+  cutR:       { windup: [0.42, 0.42, 0.18],  strike: [-0.22, -0.32, 0.6] },   // diagonal from the right
+  cutL:       { windup: [-0.24, 0.45, 0.25], strike: [0.45, -0.3, 0.56] },    // diagonal from the left
+  over:       { windup: [0.08, 0.5, 0.08],   strike: [0.06, -0.3, 0.66] },    // straight down
+  riseR:      { windup: [0.4, -0.5, 0.25],   strike: [-0.2, 0.35, 0.58] },    // rising from low right
+  riseL:      { windup: [-0.22, -0.5, 0.3],  strike: [0.42, 0.35, 0.55] },    // rising from low left
+  flatR:      { windup: [0.5, 0.12, 0.12],   strike: [-0.26, 0.05, 0.62] },   // horizontal
+  thrust:     { windup: [0.1, -0.05, 0.18],  strike: [0.06, 0.0, 0.7], thrust: true },
+  halfThrust: { windup: [0.06, -0.02, 0.1],  strike: [0.04, 0.05, 0.72], half: true },
+};
+/** Natural follow-ups: a cut ends where the next one can start. */
+const COMBOS: Partial<Record<Attack, Attack[]>> = {
+  cutR: ["riseL", "cutL", "thrust"],
+  cutL: ["riseR", "cutR", "flatR"],
+  over: ["riseR", "thrust"],
+  riseR: ["over", "cutR"],
+  riseL: ["cutL", "over"],
+  flatR: ["cutL", "thrust"],
 };
 
 export interface DummySettings {
@@ -46,6 +61,9 @@ export class DummyAI {
   private state: State = "guard";
   private timer = 1.2;
   private attack: Attack = "cutR";
+  /** Strikes left in the current combo. */
+  private chain = 0;
+  private feint = false;
   private circleDir = 1;
   private blockCooldown = 0;
   private lastHealth: number;
@@ -122,6 +140,9 @@ export class DummyAI {
         if (Math.random() < 0.35 + this.settings.aggression * 0.6) {
           const keys = Object.keys(ATTACKS) as Attack[];
           this.attack = keys[Math.floor(Math.random() * keys.length)];
+          // Longer strings the more aggressive it is.
+          this.chain = Math.random() < 0.25 + this.settings.aggression * 0.5 ? 1 + Math.floor(Math.random() * 2) : 0;
+          this.feint = Math.random() < 0.15 + this.settings.aggression * 0.15;
           this.enter("windup", THREE.MathUtils.lerp(0.55, 0.3, this.settings.aggression));
         } else {
           this.timer = 0.5 + Math.random() * 0.6;
@@ -143,6 +164,7 @@ export class DummyAI {
     let target = this.guardOffset;
     let rate = 5;
     let held = true;
+    let thrust = false;
     hs.halfGrip = false;
     switch (this.state) {
       case "guard":
@@ -151,15 +173,35 @@ export class DummyAI {
         break;
       case "windup":
         target = new THREE.Vector3(...ATTACKS[this.attack].windup);
-        hs.halfGrip = ATTACKS[this.attack].half;
+        hs.halfGrip = ATTACKS[this.attack].half ?? false;
         rate = 7;
-        if (this.timer <= 0) this.enter("strike", 0.32);
+        if (this.timer <= 0) {
+          if (this.feint) {
+            // Show one cut, throw another from the opposite side.
+            this.feint = false;
+            const alts = COMBOS[this.attack] ?? ["thrust"];
+            this.attack = alts[Math.floor(Math.random() * alts.length)];
+            this.enter("windup", 0.22);
+          } else {
+            this.enter("strike", ATTACKS[this.attack].thrust ? 0.28 : 0.32);
+          }
+        }
         break;
       case "strike":
         target = new THREE.Vector3(...ATTACKS[this.attack].strike);
-        hs.halfGrip = ATTACKS[this.attack].half;
+        hs.halfGrip = ATTACKS[this.attack].half ?? false;
+        thrust = ATTACKS[this.attack].thrust ?? false;
         rate = 16;
-        if (this.timer <= 0) this.enter("recover", 0.5);
+        if (this.timer <= 0) {
+          const next = COMBOS[this.attack];
+          if (this.chain > 0 && next) {
+            this.chain--;
+            this.attack = next[Math.floor(Math.random() * next.length)];
+            this.enter("windup", 0.2);   // short re-chamber between combo cuts
+          } else {
+            this.enter("recover", 0.5);
+          }
+        }
         break;
       case "recover":
         target = new THREE.Vector3(0.1, 0.05, 0.4);
@@ -181,7 +223,7 @@ export class DummyAI {
     }
     if (held) o.lerp(target, 1 - Math.exp(-dt * rate));
 
-    const controls: HalfSwordControls = { dx: 0, dy: 0, wheel: 0, leftHeld: held, rightHeld: held };
+    const controls: HalfSwordControls = { dx: 0, dy: 0, wheel: 0, leftHeld: held, rightHeld: held, thrust };
     hs.update(dt, controls);
   }
 
