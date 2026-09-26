@@ -14,12 +14,14 @@
 import * as THREE from "three";
 import { NMMEngine } from "./engine/index.js";
 import type { NMMAgent } from "./engine/index.js";
-import { makeScene } from "./render/scene.js";
+import { makeScene, loadEnvironment } from "./render/scene.js";
+import { createHumanMaterialFactory, DEFAULT_SKIN } from "./render/skin.js";
+import type { SkinUniforms } from "./render/skin.js";
 import { Input } from "./input.js";
 import { Touch } from "./touch.js";
 import { Debug } from "./render/debug.js";
 import { UI } from "./render/ui.js";
-import type { DirectionalLightParams } from "./render/ui.js";
+import type { DirectionalLightParams, LookParams } from "./render/ui.js";
 import { StudioLights, DEFAULT_BULB, DEFAULT_TRANSFORMS } from "./render/studiolights.js";
 import * as V from "./math/vec3.js";
 import { isQuadruped } from "./model/bundle.js";
@@ -34,6 +36,15 @@ const setBoot = (m: string) => { if (bootEl) { bootEl.textContent = m; bootEl.st
 const hideBoot = () => { if (bootEl) bootEl.style.display = "none"; };
 
 const MAX_AGENTS_PER_KIND = 32;
+
+/** Biped characters. Both share Geno's skeleton, so the same network drives
+ *  either; `human` is the textured vibe-human body re-skinned onto that rig
+ *  by `tools/build-human.mjs`. */
+const CHARACTERS = {
+  human: { label: "Realistic human", glb: "/assets/human.glb" },
+  geno: { label: "Geno (mannequin)", glb: "/assets/geno.glb" },
+} as const;
+type CharacterId = keyof typeof CHARACTERS;
 const PLAYFIELD_RADIUS = 12;
 const LOCOMOTION_SPEED = {
   walk: 0.7, pace: 1.2, trot: 2.0, canter: 4.0,
@@ -67,11 +78,19 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   const precision = (params.get("precision") === "fp32" ? "fp32" : "fp16") as "fp32" | "fp16";
 
+  const character: CharacterId = params.get("character") === "geno" ? "geno" : "human";
+
   setBoot("loading biped + quadruped bundles + meshes…");
+  let skinUniforms: SkinUniforms | null = null;
+  const bipedMaterials = character === "human"
+    ? await createHumanMaterialFactory("/textures/human/")
+    : null;
+  if (bipedMaterials) skinUniforms = bipedMaterials.uniforms;
   const [bipedEngine, quadrupedEngine] = await Promise.all([
     NMMEngine.load({
-      renderer, bundleBaseUrl: "/", characterGlbUrl: "/assets/geno.glb",
+      renderer, bundleBaseUrl: "/", characterGlbUrl: CHARACTERS[character].glb,
       maxAgents: MAX_AGENTS_PER_KIND, precision, bundleKind: "biped",
+      materialFactory: bipedMaterials?.factory,
     }),
     NMMEngine.load({
       renderer, bundleBaseUrl: "/", characterGlbUrl: "/assets/dog.glb",
@@ -81,6 +100,32 @@ async function boot() {
 
   scene.add(bipedEngine.mesh);
   scene.add(quadrupedEngine.mesh);
+
+  // Image-based fill light — skin, eyes and the clearcoat oil film need
+  // something to reflect. The visible background stays the dark studio.
+  const lookParams: LookParams = {
+    exposure: 1.0,
+    environment: 0.45,
+    poreStrength: DEFAULT_SKIN.poreStrength,
+    detailStrength: DEFAULT_SKIN.detailStrength,
+    oiliness: DEFAULT_SKIN.oiliness,
+    roughness: DEFAULT_SKIN.roughness,
+    subsurface: DEFAULT_SKIN.subsurface,
+  };
+  const applyLook = (p: LookParams) => {
+    renderer.toneMappingExposure = p.exposure;
+    scene.environmentIntensity = p.environment;
+    if (skinUniforms) {
+      skinUniforms.poreStrength.value = p.poreStrength;
+      skinUniforms.detailStrength.value = p.detailStrength;
+      skinUniforms.oiliness.value = p.oiliness;
+      skinUniforms.roughness.value = p.roughness;
+      skinUniforms.subsurface.value = p.subsurface;
+    }
+  };
+  applyLook(lookParams);
+  loadEnvironment(scene, "/assets/env/potsdamer_platz_1k.hdr")
+    .catch((err) => console.warn("[env] HDR environment unavailable", err));
 
   // Studio lights — two GLB instances drawn as one InstancedMesh per source
   // mesh, each fitted with its own RectAreaLight whose pose is derived from
@@ -234,6 +279,21 @@ async function boot() {
     directional: {
       params: directionalParams,
       onChange: (p) => applyDirectional(p),
+    },
+    character: {
+      current: character,
+      options: Object.fromEntries(
+        Object.entries(CHARACTERS).map(([id, c]) => [c.label, id])),
+      onChange: (id) => {
+        const url = new URL(location.href);
+        url.searchParams.set("character", id);
+        location.href = url.toString();
+      },
+    },
+    look: {
+      params: lookParams,
+      skin: character === "human",
+      onChange: (p) => applyLook(p),
     },
   });
 
@@ -457,6 +517,13 @@ async function boot() {
   // Steer dropdown.
   spawn("biped");
   spawn("quadruped");
+
+  // Dev-only handle for automated screenshots / console poking.
+  if (import.meta.env.DEV) {
+    (window as unknown as { __vibezzz: unknown }).__vibezzz = {
+      camera, controls, agents, get playerId() { return playerId; },
+    };
+  }
 
   // --- Main loop --------------------------------------------------------
   hideBoot();

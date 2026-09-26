@@ -1,0 +1,65 @@
+<!doctype html><html><body style="margin:0;background:#888">
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+const q = new URLSearchParams(location.search);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(innerWidth, innerHeight); renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x777777);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+const d = new THREE.DirectionalLight(0xffffff, 2); d.position.set(1, 2, 3); scene.add(d);
+const cam = new THREE.PerspectiveCamera(q.get("fov") ? +q.get("fov") : 30, innerWidth / innerHeight, 0.01, 50);
+const [cx, cy, cz, tx, ty, tz] = (q.get("cam") ?? "0,0.9,4.2,0,0.9,0").split(",").map(Number);
+cam.position.set(cx, cy, cz); cam.lookAt(tx, ty, tz);
+const loader = new GLTFLoader();
+const pose = q.get("pose") === "1";
+for (const [url, x] of [["/assets/human.glb", q.get("solo") ? 0 : -0.7], ...(q.get("solo") ? [] : [["/assets/geno.glb", 0.7]])]) {
+  const g = await loader.loadAsync(url);
+  g.scene.position.x = x;
+  if (q.get("wire")) g.scene.traverse(o => { if (o.isMesh) o.material.wireframe = true; });
+  const rotW = (bone, axis, ang) => {
+    bone.parent.updateWorldMatrix(true, false);
+    const pq = new THREE.Quaternion(); bone.parent.getWorldQuaternion(pq);
+    const qa = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(...axis).normalize(), ang);
+    bone.quaternion.premultiply(pq.clone().invert().multiply(qa).multiply(pq));
+  };
+  if (q.get("cross")) {
+    const b = n => g.scene.getObjectByName(n); const a = +q.get("cross");
+    rotW(b("RightArm"), [0, 1, 0], a); rotW(b("RightArm"), [1, 0, 0], -0.6);
+    rotW(b("LeftArm"), [0, 1, 0], -a); rotW(b("LeftArm"), [0, 0, 1], 0.9);
+    rotW(b("RightShoulder"), [0, 1, 0], 0.3);
+  }
+  if (q.get("shrug")) {
+    const b = n => g.scene.getObjectByName(n);
+    const a = +q.get("shrug");
+    b("LeftShoulder").rotateZ(a); b("RightShoulder").rotateZ(-a);
+    b("Neck").rotateX(0.5); b("Spine3").rotateX(0.3);
+  }
+  if (pose) {
+    const b = n => g.scene.getObjectByName(n);
+    b("LeftArm").rotateZ(-0.9); b("RightArm").rotateX(-1.0);
+    b("LeftForeArm").rotateX(-1.2); b("RightForeArm").rotateZ(1.2);
+    b("LeftUpLeg").rotateX(-1.0); b("LeftLeg").rotateX(1.3);
+    b("Spine1").rotateX(0.3); b("Spine3").rotateY(0.4); b("Head").rotateY(0.5); b("Neck").rotateX(0.3);
+    b("LeftHand").rotateZ(0.6); b("RightHand").rotateX(0.8); b("LeftHandIndex1").rotateZ(0.8);
+  }
+  scene.add(g.scene);
+  if (q.get("probe")) {
+    g.scene.updateMatrixWorld(true);
+    g.scene.traverse(o => { if (!o.isSkinnedMesh) return;
+      o.skeleton.update();
+      const pos = o.geometry.attributes.position, idx = o.geometry.index.array, v = [];
+      for (let i = 0; i < pos.count; i++) { const t = new THREE.Vector3(); o.getVertexPosition(i, t); v.push(t); }
+      const sk = o.geometry.attributes.skinIndex, sw = o.geometry.attributes.skinWeight;
+      for (let t = 0; t < idx.length; t += 3) {
+        const e = Math.max(v[idx[t]].distanceTo(v[idx[t+1]]), v[idx[t+1]].distanceTo(v[idx[t+2]]), v[idx[t+2]].distanceTo(v[idx[t]]));
+        if (e > 0.12) console.log(o.name, "tri", t/3, e.toFixed(3), [0,1,2].map(k => { const i = idx[t+k]; return i + ":" + [0,1,2,3].map(c => o.skeleton.bones[sk.getComponent(i,c)].name + "=" + sw.getComponent(i,c).toFixed(2)).join(","); }).join(" | "));
+      }
+    });
+  }
+}
+renderer.render(scene, cam);
+document.title = "ready";
+</script></body></html>

@@ -1,0 +1,11 @@
+import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+const [,, url, out, waitMs, w, h] = process.argv;
+const b = await chromium.launch({ channel: 'chromium', args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan', '--use-vulkan=swiftshader', '--use-angle=swiftshader', '--disable-gpu-watchdog', '--enable-dawn-features=allow_unsafe_apis,disable_robustness', '--disable-dawn-features=timestamp_quantization'] });
+const p = await b.newPage({ viewport: { width: +(w || 1280), height: +(h || 800) } });
+p.on('console', m => { const t = m.text(); if (!/vite|GPU stall/.test(t)) console.log('console:', t.slice(0, 400)); });
+let perr = 0; p.on('pageerror', e => { if (perr++ < 5) console.log('pageerror:', e.message); });
+await p.goto(url);
+await p.waitForTimeout(+(waitMs || 15000));
+console.log('boot:', await p.evaluate(() => document.getElementById('boot')?.style.display + ' ' + document.getElementById('boot')?.textContent));
+await p.screenshot({ path: out });
+await b.close();

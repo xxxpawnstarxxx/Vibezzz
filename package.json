@@ -1,5 +1,5 @@
 {
-  "name": "ai4anim-webgpu",
+  "name": "vibezzz",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:human": "node tools/build-human.mjs ../vibe-human"
   },
   "dependencies": {
     "stats-gl": "^4.1.0",
@@ -15,8 +16,13 @@
     "tweakpane": "^4.0.5"
   },
   "devDependencies": {
+    "@gltf-transform/core": "^4.5.0",
+    "@gltf-transform/extensions": "^4.5.0",
+    "@gltf-transform/functions": "^4.5.0",
     "@tweakpane/core": "^2.0.5",
     "@types/three": "^0.184.0",
+    "draco3dgltf": "^1.5.7",
+    "sharp": "^0.35.4",
     "typescript": "^6.0.3",
     "vite": "^8.0.9"
   }

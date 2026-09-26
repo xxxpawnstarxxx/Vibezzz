@@ -74,6 +74,11 @@ export interface SharedSkinnedRig {
   trackedBones: THREE.Bone[];
 }
 
+/** Builds the node material for one of the template's source materials.
+ *  The rig assigns the instanced-skinning `positionNode` afterwards, so a
+ *  factory only sets up shading (color / normal / roughness / SSS nodes). */
+export type RigMaterialFactory = (source: THREE.Material, index: number) => MeshStandardNodeMaterial;
+
 /** Build the shared instanced SkinnedMesh from a template GLB mesh.
  *  Geometry is shared (attributes live once on the GPU); material is a
  *  custom MeshStandardNodeMaterial with overridden skinning nodes.
@@ -82,12 +87,18 @@ export interface SharedSkinnedRig {
  *  that's missing from the template's scene graph will be synthesized at
  *  identity-local to its declared parent. Used for models (e.g. the Quadruped
  *  dog) whose training data includes leaf markers that weren't exported in
- *  the shipped GLB. */
+ *  the shipped GLB.
+ *
+ *  The template may carry a material array + geometry groups (multi-material
+ *  characters: skin / head / eyes). Every material gets its own copy of the
+ *  skinning nodes; `materialFactory` optionally replaces the default
+ *  MeshStandard-style conversion per material. */
 export function createSharedSkinnedRig(
   template: THREE.SkinnedMesh,
   maxAgents: number,
   trackedBoneNames: readonly string[],
   trackedParentNames?: readonly (string | null)[],
+  materialFactory?: RigMaterialFactory,
 ): SharedSkinnedRig {
   // Walk the template scene graph so we can find non-skinning "leaf marker"
   // bones too. Some rigs (Dog.glb) have sites (e.g. HeadSite) that the
@@ -249,44 +260,23 @@ export function createSharedSkinnedRig(
 
     return localPos;
   });
-  const positionCall = (positionNode as () => unknown)();
 
-  // -- Material -----------------------------------------------------------
-  // Copy the template's MeshStandardMaterial data (color, maps, …) into a
-  // MeshStandardNodeMaterial, then override position + normal with our
-  // instanced-skinning nodes. All other node-material fields (envmap,
-  // shadows, tone mapping) keep their defaults.
-  const material = new MeshStandardNodeMaterial();
-  // Copy scalar material data from the template but avoid a full `.copy()`
-  // — that pulls in undefined NodeMaterial-specific fields from a plain
-  // MeshStandardMaterial template and trips an `isOutputStructNode` check
-  // inside three's default fragment flow.
-  {
-    const src = template.material as THREE.MeshStandardMaterial;
-    if (src.color) material.color.copy(src.color);
-    if (src.map) material.map = src.map;
-    if (src.normalMap) material.normalMap = src.normalMap;
-    if (src.aoMap) material.aoMap = src.aoMap;
-    if (src.emissive) material.emissive.copy(src.emissive);
-    if (src.emissiveMap) material.emissiveMap = src.emissiveMap;
-    if (src.roughnessMap) material.roughnessMap = src.roughnessMap;
-    if (src.metalnessMap) material.metalnessMap = src.metalnessMap;
-    material.roughness = src.roughness ?? 1;
-    material.metalness = src.metalness ?? 0;
-    material.transparent = src.transparent;
-    material.opacity = src.opacity;
-    material.side = src.side;
-  }
-  (material as unknown as { positionNode: unknown }).positionNode = positionCall;
-  // normalNode stays null — the skinning Fn above mutates `normalLocal` as a
-  // side effect, so three's default `normalLocal → normalView` path produces
-  // a correctly-transformed view-space normal downstream.
-  (material as unknown as { normalNode: unknown }).normalNode = null;
-  // Defensive: ensure the lighting branch runs in NodeMaterial.setup().
-  (material as unknown as { fragmentNode: unknown }).fragmentNode = null;
+  // -- Materials ----------------------------------------------------------
+  // Each source material becomes a node material whose position + normal are
+  // overridden with our instanced-skinning nodes. All other node-material
+  // fields (envmap, shadows, tone mapping) keep their defaults.
+  const sources = Array.isArray(template.material) ? template.material : [template.material];
+  const materials = sources.map((src, i) => {
+    const material = materialFactory ? materialFactory(src, i) : standardNodeMaterialFrom(src);
+    (material as unknown as { positionNode: unknown }).positionNode = (positionNode as () => unknown)();
+    // Defensive: ensure the lighting branch runs in NodeMaterial.setup().
+    (material as unknown as { fragmentNode: unknown }).fragmentNode = null;
+    return material;
+  });
 
   // -- Mesh ---------------------------------------------------------------
-  const mesh = new THREE.SkinnedMesh(template.geometry, material);
+  const mesh = new THREE.SkinnedMesh(
+    template.geometry, materials.length === 1 ? materials[0] : materials);
   mesh.frustumCulled = false;
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -336,4 +326,32 @@ export function createSharedSkinnedRig(
     templateRoot,
     trackedBones,
   };
+}
+
+/** Default conversion: copy the template's MeshStandardMaterial data (color,
+ *  maps, …) into a MeshStandardNodeMaterial. Avoids a full `.copy()` — that
+ *  pulls in undefined NodeMaterial-specific fields from a plain
+ *  MeshStandardMaterial template and trips an `isOutputStructNode` check
+ *  inside three's default fragment flow. */
+function standardNodeMaterialFrom(source: THREE.Material): MeshStandardNodeMaterial {
+  const material = new MeshStandardNodeMaterial();
+  const src = source as THREE.MeshStandardMaterial;
+  if (src.color) material.color.copy(src.color);
+  if (src.map) material.map = src.map;
+  if (src.normalMap) material.normalMap = src.normalMap;
+  if (src.aoMap) material.aoMap = src.aoMap;
+  if (src.emissive) material.emissive.copy(src.emissive);
+  if (src.emissiveMap) material.emissiveMap = src.emissiveMap;
+  if (src.roughnessMap) material.roughnessMap = src.roughnessMap;
+  if (src.metalnessMap) material.metalnessMap = src.metalnessMap;
+  material.roughness = src.roughness ?? 1;
+  material.metalness = src.metalness ?? 0;
+  material.transparent = src.transparent;
+  material.opacity = src.opacity;
+  material.side = src.side;
+  // normalNode stays null — the skinning Fn mutates `normalLocal` as a side
+  // effect, so three's default `normalLocal → normalView` path produces a
+  // correctly-transformed view-space normal downstream.
+  (material as unknown as { normalNode: unknown }).normalNode = null;
+  return material;
 }

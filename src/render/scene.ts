@@ -1,6 +1,15 @@
 import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
+
+/** Use an equirectangular HDR as image-based lighting only (the node
+ *  renderer pre-filters it into a PMREM on first use). */
+export async function loadEnvironment(scene: THREE.Scene, url: string): Promise<void> {
+  const tex = await new HDRLoader().loadAsync(url);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  scene.environment = tex;
+}
 
 export async function makeScene(canvas: HTMLCanvasElement) {
   const renderer = new WebGPURenderer({

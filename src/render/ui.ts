@@ -23,6 +23,17 @@ export interface DirectionalLightParams {
   castShadow: boolean;
 }
 
+/** Scene / skin look controls. Skin fields only apply to the textured human. */
+export interface LookParams {
+  exposure: number;
+  environment: number;
+  poreStrength: number;
+  detailStrength: number;
+  oiliness: number;
+  roughness: number;
+  subsurface: number;
+}
+
 export interface UIState {
   steer: string;
   steerKind: ModelKind | null;
@@ -60,6 +71,18 @@ export interface UIOptions {
     transforms: [StudioTransform, StudioTransform];
     onBulbChange: (p: StudioBulbParams) => void;
     onTransformChange: (idx: 0 | 1, t: StudioTransform) => void;
+  };
+  /** Biped character picker (switching reloads the page). */
+  character?: {
+    current: string;
+    options: Record<string, string>;
+    onChange: (id: string) => void;
+  };
+  /** Exposure / environment / skin shading controls. */
+  look?: {
+    params: LookParams;
+    skin: boolean;
+    onChange: (p: LookParams) => void;
   };
   /** Directional key-light controls (color, intensity, sun angle, shadows). */
   directional?: {
@@ -137,7 +160,7 @@ export class UI {
     // --- Tweakpane ---
     // Pane is hidden via CSS on touch devices, so expansion only matters
     // on desktop — open by default there for discoverability.
-    this.pane = new Pane({ title: "AI4Anim WebGPU", expanded: !this.isTouch }) as unknown as Pane;
+    this.pane = new Pane({ title: "Vibezzz", expanded: !this.isTouch }) as unknown as Pane;
 
     // Spawn controls — always first so users find them quickly.
     const spawnFolder = this.pane.addFolder({ title: "Spawn", expanded: true });
@@ -147,6 +170,14 @@ export class UI {
       .on("click", () => opts.onSpawnDog());
     (spawnFolder.addButton({ title: "Clear All" }) as ButtonApi)
       .on("click", () => opts.onClearAll());
+
+    if (opts.character) {
+      const c = opts.character;
+      const charState = { character: c.current };
+      (spawnFolder.addBinding(charState, "character", {
+        label: "Biped", options: c.options, index: 0,
+      }) as BindingApi<string>).on("change", (ev) => c.onChange(String(ev.value)));
+    }
 
     // Control — steer dropdown lives here, rebuilt whenever the roster changes.
     this.controlFolder = this.pane.addFolder({ title: "Control", expanded: true });
@@ -195,8 +226,30 @@ export class UI {
     (camFolder.addButton({ title: "Reset Camera" }) as ButtonApi)
       .on("click", () => opts.onResetCamera());
 
+    if (opts.look) this.buildLookFolder(opts.look);
     if (opts.directional) this.buildDirectionalFolder(opts.directional);
     if (opts.studio) this.buildStudioFolder(opts.studio);
+  }
+
+  private buildLookFolder(l: NonNullable<UIOptions["look"]>): void {
+    const folder = this.pane.addFolder({ title: "Look", expanded: false });
+    const fire = () => l.onChange(l.params);
+    (folder.addBinding(l.params, "exposure",
+      { min: 0.2, max: 2.5, step: 0.01 }) as BindingApi).on("change", fire);
+    (folder.addBinding(l.params, "environment",
+      { label: "env light", min: 0, max: 2, step: 0.01 }) as BindingApi).on("change", fire);
+    if (!l.skin) return;
+    const skin = folder.addFolder({ title: "Skin", expanded: true });
+    (skin.addBinding(l.params, "poreStrength",
+      { label: "pores", min: 0, max: 1.5, step: 0.01 }) as BindingApi).on("change", fire);
+    (skin.addBinding(l.params, "detailStrength",
+      { label: "detail normal", min: 0, max: 1.5, step: 0.01 }) as BindingApi).on("change", fire);
+    (skin.addBinding(l.params, "oiliness",
+      { min: 0, max: 1, step: 0.01 }) as BindingApi).on("change", fire);
+    (skin.addBinding(l.params, "roughness",
+      { min: 0.3, max: 1, step: 0.01 }) as BindingApi).on("change", fire);
+    (skin.addBinding(l.params, "subsurface",
+      { min: 0, max: 1.5, step: 0.01 }) as BindingApi).on("change", fire);
   }
 
   private buildDirectionalFolder(d: NonNullable<UIOptions["directional"]>): void {

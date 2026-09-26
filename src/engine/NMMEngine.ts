@@ -28,6 +28,7 @@
 import * as THREE from "three";
 import type { WebGPURenderer } from "three/webgpu";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { Bundle } from "../model/bundle.js";
 import type { ModelKind } from "../model/bundle.js";
 import { Inference } from "../inference/Inference.js";
@@ -35,15 +36,19 @@ import type { WeightPrecision } from "../inference/Inference.js";
 import { NMMAgent } from "./NMMAgent.js";
 import type { NMMAgentOptions } from "./NMMAgent.js";
 import { createSharedSkinnedRig } from "./SharedSkinnedMesh.js";
-import type { SharedSkinnedRig } from "./SharedSkinnedMesh.js";
+import type { SharedSkinnedRig, RigMaterialFactory } from "./SharedSkinnedMesh.js";
 
 export interface NMMEngineOptions {
   renderer: WebGPURenderer;
   /** Path where `<kind>.json` + `<kind>.bin` live (trailing slash optional). */
   bundleBaseUrl: string;
   /** URL of a GLB whose SkinnedMesh provides the shared rig (geometry,
-   *  materials, skeleton, bind matrices). */
+   *  materials, skeleton, bind matrices). Multi-primitive meshes (e.g. body /
+   *  head / eyes with separate materials) are merged into one grouped
+   *  geometry so every agent still renders in a single instanced mesh. */
   characterGlbUrl: string;
+  /** Optional per-material shading override (see `RigMaterialFactory`). */
+  materialFactory?: RigMaterialFactory;
   /** Maximum simultaneous characters. Storage buffers are sized for this. */
   maxAgents: number;
   /** Which bundle to load. Default `biped`. */
@@ -88,6 +93,7 @@ export class NMMEngine {
       .parent_names;
     const rig = createSharedSkinnedRig(
       templateMesh, opts.maxAgents, bundle.meta.skeleton.bone_names, parentNames,
+      opts.materialFactory,
     );
 
     const inference = await Inference.create(bundle, opts.renderer, {
@@ -196,22 +202,41 @@ export class NMMEngine {
   }
 }
 
-/** Load a GLB and return its first SkinnedMesh. */
+/** Load a GLB and return its SkinnedMesh. When the character is split into
+ *  several skinned primitives sharing one skeleton (GLTFLoader emits one
+ *  SkinnedMesh per primitive), they're merged into a single geometry with
+ *  one group per source material. */
 async function loadTemplateSkinnedMesh(url: string): Promise<THREE.SkinnedMesh> {
   const loader = new GLTFLoader();
   const gltf = await loader.loadAsync(url);
-  let found: THREE.SkinnedMesh | null = null;
+  const parts: THREE.SkinnedMesh[] = [];
   gltf.scene.traverse((obj) => {
-    if ((obj as THREE.SkinnedMesh).isSkinnedMesh && found === null) {
-      found = obj as THREE.SkinnedMesh;
+    const sm = obj as THREE.SkinnedMesh;
+    if (sm.isSkinnedMesh && (parts.length === 0 || sm.skeleton === parts[0].skeleton)) {
+      parts.push(sm);
     }
   });
-  if (found === null) {
+  if (parts.length === 0) {
     throw new Error(`NMMEngine: no SkinnedMesh in ${url}`);
+  }
+  let skinnedMesh = parts[0];
+  if (parts.length > 1) {
+    const geometry = mergeGeometries(parts.map((p) => p.geometry), true);
+    if (!geometry) {
+      throw new Error(`NMMEngine: skinned primitives in ${url} have mismatched attributes`);
+    }
+    const merged = new THREE.SkinnedMesh(
+      geometry, parts.map((p) => p.material as THREE.Material));
+    merged.name = parts[0].parent?.name || parts[0].name;
+    // Stand in for the first part in the scene graph so the rig can still
+    // walk up to the template root, then bind with the shared skeleton.
+    parts[0].parent!.add(merged);
+    for (const p of parts) p.removeFromParent();
+    merged.bind(parts[0].skeleton, parts[0].bindMatrix);
+    skinnedMesh = merged;
   }
   // Ensure the template's skeleton world matrices reflect its bind pose —
   // the Actor / rig snapshot rely on this at construction time.
-  const skinnedMesh = found as THREE.SkinnedMesh;
   skinnedMesh.updateMatrixWorld(true);
   return skinnedMesh;
 }
