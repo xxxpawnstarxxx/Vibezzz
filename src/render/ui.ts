@@ -86,6 +86,7 @@ export interface UIOptions {
     onSwapHands: () => void;
     dummy: { aggression: number; blockSkill: number; fightsBack: boolean; power: number };
     onSpawnDummy: () => void;
+    onGauntlet: () => void;
     /** Gore Rate / Blood Rate / damage rates (Half Sword game-mode knobs). */
     gore: { bloodRate: number; playerDamage: number; enemyDamage: number };
   };
@@ -253,6 +254,7 @@ export class UI {
     folder.addBinding(h.settings, "bladeWeight", { label: "blade weight", min: 0.2, max: 3, step: 0.05 });
     const d = folder.addFolder({ title: "Sparring dummy", expanded: true });
     (d.addButton({ title: "Spawn dummy" }) as ButtonApi).on("click", () => h.onSpawnDummy());
+    (d.addButton({ title: "Start / stop gauntlet" }) as ButtonApi).on("click", () => h.onGauntlet());
     d.addBinding(h.dummy, "fightsBack", { label: "fights back" });
     d.addBinding(h.dummy, "aggression", { min: 0, max: 1, step: 0.05 });
     d.addBinding(h.dummy, "blockSkill", { label: "block skill", min: 0, max: 1, step: 0.05 });

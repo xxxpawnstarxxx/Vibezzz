@@ -138,6 +138,19 @@
         color: #9aa3ad; font-size: 11px; letter-spacing: 0.08em;
       }
       html.half-sword #combat-hud { top: 26px; }
+      /* Enemy overhead health bars, gauntlet wave label, grabbed struggle meter. */
+      #enemy-bars { position: fixed; inset: 0; pointer-events: none; z-index: 39; overflow: hidden; }
+      .enemy-bar { position: absolute; transform: translate(-50%, -100%); width: 110px; text-align: center; }
+      .enemy-bar .name { font-size: 10px; letter-spacing: 0.06em; color: #e7d9c8; text-shadow: 0 1px 2px #000; white-space: nowrap; }
+      .enemy-bar .track { height: 5px; margin-top: 2px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.25); border-radius: 2px; overflow: hidden; }
+      .enemy-bar .fill { height: 100%; background: linear-gradient(90deg, #b3321f, #e0703e); transition: width 0.15s; }
+      #wave-label { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); z-index: 40; pointer-events: none;
+        font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: #f2c46d; text-shadow: 0 1px 3px #000; }
+      #grabbed-hint { position: fixed; top: 38%; left: 50%; transform: translateX(-50%); z-index: 46; pointer-events: none;
+        display: none; text-align: center; color: #ffb4a6; font-size: 13px; letter-spacing: 0.1em; text-shadow: 0 1px 3px #000; }
+      #grabbed-hint.show { display: block; }
+      #grabbed-hint .track { width: 180px; height: 6px; margin: 6px auto 0; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.3); }
+      #grabbed-hint .fill { height: 100%; width: 0; background: #ffb4a6; }
       /* Combat HUD — health bars, damage popups, hit vignette, banner. */
       #combat-hud {
         position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
@@ -333,6 +346,9 @@
       <div class="bar foe"><span id="hp-foe-label">Dummy</span><div class="track"><div class="fill" id="hp-foe"></div></div></div>
     </div>
     <div id="dmg-layer"></div>
+    <div id="enemy-bars"></div>
+    <div id="wave-label"></div>
+    <div id="grabbed-hint">GRABBED — pull away (WASD) or shake the mouse<div class="track"><div class="fill"></div></div></div>
     <div id="hit-vignette"></div>
     <div id="combat-banner"></div>
     <div id="hs-hint">
@@ -340,6 +356,7 @@
       <div><kbd>RMB</kbd> right hand · <kbd>LMB</kbd> left hand · both = two-handed · mouse moves the hand · <kbd>wheel</kbd> reach · <kbd>Space</kbd> thrust</div>
       <div><kbd>Q</kbd> grab left · <kbd>E</kbd> grab right (wrist, neck, blade, swords on the floor) · pull to drag, yank to throw / disarm · <kbd>F</kbd> drop sword</div>
       <div><kbd>G</kbd> half-sword grip · <kbd>X</kbd> swap hands · mouse (no button) or <kbd>Z</kbd>/<kbd>C</kbd> turn · <kbd>WASD</kbd> step · <kbd>H</kbd> exit</div>
+      <div>Gauntlet: Half Sword → Sparring dummy → Start gauntlet · <kbd>R</kbd> retry after death · ⚔ = enemy allowed to attack right now</div>
       <div>Cut with the edge leading — flat hits only bruise · a hard thrust sticks: pull straight back, wiggle to tear</div>
     </div>
     <div id="credit-popup" class="hidden" role="dialog" aria-label="Credits">

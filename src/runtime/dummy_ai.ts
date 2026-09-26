@@ -24,12 +24,14 @@ import * as THREE from "three";
 import type { HalfSword, HalfSwordControls, HandSide } from "./half_sword.js";
 import type { Fighter } from "./combat.js";
 import type { LooseSword } from "./loose_items.js";
+import type { GrabController, GrabWorld } from "./grab.js";
 import type { Vec3 } from "../math/vec3.js";
 
 export type Behavior = "retreat" | "harass" | "attack" | "defend" | "safe" | "search";
 export type Stage =
   | "idle" | "intent" | "charge" | "swing" | "reverse" | "thrust" | "altGrip"
-  | "tackle" | "parried" | "finish" | "block" | "stagger" | "down" | "pickup" | "wrench";
+  | "tackle" | "parried" | "finish" | "block" | "stagger" | "down" | "pickup" | "wrench"
+  | "grapple" | "punch";
 type Range = "safe" | "middle" | "striking";
 type Attack = "cutR" | "cutL" | "over" | "riseR" | "riseL" | "flatR" | "thrust" | "halfThrust";
 
@@ -66,6 +68,8 @@ export interface DummySettings {
   fightsBack: boolean;
   /** Scales the damage its blade deals. */
   power: number;
+  /** Chance to close in and grapple instead of cutting (0…1). */
+  grapple?: number;
 }
 
 export interface DummyWorld {
@@ -76,7 +80,23 @@ export interface DummyWorld {
   tackled(by: Fighter, target: Fighter): void;
 }
 
+/** Orders from the EnemyDirector (group tactics). */
+export interface DirectorOrders {
+  /** Holds an attack token — may commit to attacks / grapples. */
+  canAttack: boolean;
+  /** Assigned position around the opponent (radians, world yaw). */
+  slotAngle: number | null;
+}
+
 export class DummyAI {
+  /** Set by the director each frame; defaults to a solo fighter. */
+  orders: DirectorOrders = { canAttack: true, slotAngle: null };
+  /** Bare-hand / off-hand grappling (wired by the game). */
+  grabber: GrabController | null = null;
+  grabWorld: GrabWorld | null = null;
+  private grappleSide: HandSide = "Left";
+  private grappleYank = 0;
+  private punchSide: HandSide = "Right";
   settings: DummySettings = { aggression: 0.55, blockSkill: 0.55, fightsBack: true, power: 0.6 };
   behavior: Behavior = "safe";
   stage: Stage = "idle";
@@ -157,14 +177,16 @@ export class DummyAI {
     const range: Range = dist < 1.45 ? "striking" : dist < 2.5 ? "middle" : "safe";
 
     // --- behaviour selection (AI_CombatBehavior) ------------------------------
-    const busy = ["intent", "charge", "swing", "reverse", "thrust", "altGrip", "tackle", "stagger", "down", "parried", "pickup", "wrench"].includes(this.stage);
+    const busy = ["intent", "charge", "swing", "reverse", "thrust", "altGrip", "tackle", "stagger", "down", "parried", "pickup", "wrench", "grapple", "punch"].includes(this.stage);
     const nearestItem = this.nearestItem(world.items, pos);
     if (this.behaviorTimer <= 0 && !busy) {
       this.behaviorTimer = 0.4;
-      if (!hs.armed) this.behavior = nearestItem ? "search" : "retreat";
+      if (!hs.armed) this.behavior = nearestItem ? "search" : this.orders.canAttack && range !== "safe" ? "attack" : "harass";
       else if (!this.settings.fightsBack) this.behavior = range === "striking" ? "defend" : "safe";
       else if (!this.berserk && f.health < f.maxHealth * 0.3 && Math.random() < 0.5) this.behavior = "retreat";
-      else if (range === "striking") this.behavior = Math.random() < 0.3 + aggr * 0.55 + (this.berserk ? 0.3 : 0) ? "attack" : "defend";
+      else if (range === "striking" && this.orders.canAttack) this.behavior = Math.random() < 0.3 + aggr * 0.55 + (this.berserk ? 0.3 : 0) ? "attack" : "defend";
+      else if (range === "striking") this.behavior = "defend";
+      else if (!this.orders.canAttack) this.behavior = Math.random() < 0.6 ? "harass" : "safe";
       else if (range === "middle") this.behavior = Math.random() < 0.55 + aggr * 0.3 ? "harass" : "safe";
       else this.behavior = "safe";
       this.strafe = this.behavior === "harass" || (this.behavior === "defend" && Math.random() < 0.5) ? "circle" : "straight";
@@ -177,11 +199,14 @@ export class DummyAI {
 
     // --- footwork ------------------------------------------------------------
     let speed = 0, side = 0;
-    const want = this.behavior === "retreat" ? 3.4 : this.behavior === "safe" ? 2.2
-      : this.behavior === "harass" ? 1.9 : 1.35;
+    let want = this.behavior === "retreat" ? 3.4 : this.behavior === "safe" ? 2.2
+      : this.behavior === "harass" ? 1.9 : hs.armed ? 1.35 : 0.85;
+    if (!this.orders.canAttack) want = Math.max(want, 2.1);   // wait your turn
+    if (this.stage === "grapple") want = 0.62;
     if (this.stage === "down" || this.stage === "pickup") speed = 0;
     else if (this.stage === "stagger" || this.stage === "parried") speed = -0.5;
     else if (this.stage === "tackle") speed = 2.4;
+    else if (this.stage === "grapple") speed = dist > 0.62 && !this.grabber?.holds[this.grappleSide] ? 0.95 : dist < 0.45 ? -0.6 : 0; // close in to arm's length
     else if (dist < 0.6) speed = -1.1;                                    // never share a body
     else if (!this.settings.fightsBack || (f.grabbedBy ?? 0) > 0) speed = 0; // training post / held: stand ground
     else if (this.stage === "charge" && ATTACKS[this.attack].thrust) speed = 1.4; // Charge Forward lunge
@@ -190,6 +215,17 @@ export class DummyAI {
     else if (dist < want - 0.25) speed = -0.6;
     if (this.strafe === "circle" && !busy && dist < 3) side = (this.behavior === "harass" ? 0.45 : 0.28) * this.circleDir;
     let vel: Vec3 = [fx * speed - fz * side, 0, fz * speed + fx * side];
+    // Surround: drift toward the assigned slot around the opponent.
+    if (opponent && this.orders.slotAngle !== null && !busy && dist < 4.5) {
+      const op = opponent.agent.getPosition();
+      const sx = op[0] + Math.sin(this.orders.slotAngle) * want, sz = op[2] + Math.cos(this.orders.slotAngle) * want;
+      const tx = sx - pos[0], tz = sz - pos[2];
+      const tl = Math.hypot(tx, tz);
+      if (tl > 0.25) {
+        const k = Math.min(0.9, tl) / tl;
+        vel = [vel[0] * 0.4 + tx * k, 0, vel[2] * 0.4 + tz * k];
+      }
+    }
 
     // Search Weapon: walk to the nearest loose sword and take it up.
     if (this.behavior === "search" && nearestItem && this.stage !== "down" && this.stage !== "stagger") {
@@ -215,7 +251,7 @@ export class DummyAI {
       : "LegsApart";
     if (f.agent.style !== style) f.agent.setStyle(style);
     // Stoop to pick things up.
-    const lean = this.stage === "pickup" ? 0.85 : 0;
+    const lean = f.dead ? 1.15 : this.stage === "pickup" ? 0.85 : 0;
     f.reactor.leanTarget.copy(new THREE.Vector3().crossVectors(UP, new THREE.Vector3(facing[0], 0, facing[2])).normalize().multiplyScalar(lean));
 
     // --- blade reading (Defend) -----------------------------------------------
@@ -229,6 +265,18 @@ export class DummyAI {
       this.attack = Math.random() < 0.5 ? "thrust" : (Math.random() < 0.5 ? "cutR" : "cutL");
       this.chain = 0; this.feint = false;
       this.enter("charge", 0.12);
+    }
+    if (this.stage === "idle" && this.timer <= 0 && opponent && this.behavior === "attack" && this.orders.canAttack
+      && dist < 1.3 && Math.random() < (hs.armed ? (this.settings.grapple ?? 0.15) : 0.45) && this.grabber) {
+      // Close in and grapple: disarm the sword wrist or throw by the collar.
+      this.grappleSide = hs.armed ? (hs.mainSide === "Right" ? "Left" : "Right") : (Math.random() < 0.5 ? "Left" : "Right");
+      if (!hs.disabled[this.grappleSide]) { this.grappleYank = 0; this.enter("grapple", 2.4); }
+    }
+    if (this.stage === "idle" && this.timer <= 0 && !hs.armed && this.behavior === "attack" && range !== "safe" && dist < 1.05) {
+      // Bare hands: jab with alternating hands.
+      this.punchSide = this.punchSide === "Right" ? "Left" : "Right";
+      if (hs.disabled[this.punchSide]) this.punchSide = this.punchSide === "Right" ? "Left" : "Right";
+      this.enter("punch", 0.32);
     }
     if (this.stage === "idle" && this.timer <= 0) {
       if (hs.armed && this.behavior === "attack" && range !== "safe") this.chooseAttack(dist);
@@ -337,21 +385,36 @@ export class DummyAI {
           this.enter("finish", 0.4);
         }
         break;
+      case "grapple":
+        target = GUARD;
+        rate = 5;
+        break;
       case "down":
         held = false;
         break;
     }
+    this.updateGrapple(dt, opponent);
     if (!hs.armed) {
-      // Bare hands: fists up in guard when close, else relaxed.
+      // Bare hands: fists up in guard when close, jab on "punch".
       const up = range !== "safe" && !["down", "stagger", "pickup"].includes(this.stage);
-      hs.handOffset("Left").lerp(new THREE.Vector3(-0.12, 0.05, 0.32), 1 - Math.exp(-dt * 6));
-      hs.handOffset("Right").lerp(new THREE.Vector3(0.12, 0.08, 0.3), 1 - Math.exp(-dt * 6));
+      const k = 1 - Math.exp(-dt * 7);
+      const guardL = new THREE.Vector3(-0.12, 0.05, 0.32), guardR = new THREE.Vector3(0.12, 0.08, 0.3);
+      if (this.stage === "punch") {
+        const jab = new THREE.Vector3(this.punchSide === "Right" ? 0.04 : -0.04, 0.14, 0.72);
+        const out = this.timer > 0.14;                 // extend, then retract
+        const side = this.punchSide;
+        hs.handOffset(side).lerp(out ? jab : side === "Right" ? guardR : guardL, 1 - Math.exp(-dt * (out ? 22 : 9)));
+        if (this.timer <= 0) this.enter("finish", 0.25 + Math.random() * 0.3);
+      } else {
+        hs.handOffset("Left").lerp(guardL, k);
+        hs.handOffset("Right").lerp(guardR, k);
+      }
       hs.update(dt, { dx: 0, dy: 0, wheel: 0, leftHeld: up, rightHeld: up });
       return;
     }
     if (held) o.lerp(target, 1 - Math.exp(-dt * rate));
     const offSide: HandSide = hs.mainSide === "Right" ? "Left" : "Right";
-    const two = held && !hs.disabled[offSide];
+    const two = held && !hs.disabled[offSide] && this.stage !== "grapple";
     const controls: HalfSwordControls = {
       dx: 0, dy: 0, wheel: 0,
       leftHeld: held && (two || hs.mainSide === "Left"),
@@ -359,6 +422,45 @@ export class DummyAI {
       thrust,
     };
     hs.update(dt, controls);
+  }
+
+  /** Drive the grab hand while grappling: reach for the sword wrist (or the
+   *  collar), hold, then yank hard a few times to disarm / throw. */
+  private updateGrapple(dt: number, opponent: Fighter | null): void {
+    const g = this.grabber, w = this.grabWorld;
+    if (!g || !w) return;
+    const side = this.grappleSide;
+    if (this.stage !== "grapple" || !opponent) {
+      g.update(dt, { grab: { Left: false, Right: false }, aim: { Left: false, Right: false } }, w);
+      return;
+    }
+    const opArmed = opponent.sword?.armed ?? false;
+    const hold = g.holds[side];
+    let point: THREE.Vector3 | null = null;
+    if (hold && hold.kind !== "item") {
+      this.grappleYank += dt;
+      const attach = g.holdPoint(side);
+      if (attach) {
+        // Rhythmic yanks: hold, then snap back toward self and to the side.
+        const phase = this.grappleYank % 0.6;
+        const back = this.sword.chestPosition.clone().sub(attach).setY(0).normalize();
+        const lateral = new THREE.Vector3(-back.z, 0, back.x).multiplyScalar(Math.floor(this.grappleYank / 0.6) % 2 ? 1 : -1);
+        point = phase > 0.35 ? attach.clone().addScaledVector(back, 0.45).addScaledVector(lateral, 0.35) : attach.clone();
+      }
+    }
+    g.update(dt, {
+      grab: { Left: side === "Left", Right: side === "Right" },
+      aim: { Left: false, Right: false },
+      point: { [side]: point },
+      prefer: (_label, part) => {
+        if (part === "item") return -Infinity;
+        if (opArmed && part === "wrist") return 0.6;          // go for the sword hand
+        if (opArmed && part === "blade") return 0.4;
+        if (!opArmed && (part === "collar" || part === "neck")) return 0.6;
+        return 0;
+      },
+    }, w);
+    if ((!hold && this.timer < 1.2) || this.timer <= 0) this.enter("finish", 0.4);
   }
 
   /** Choose Hand + charge variant. */

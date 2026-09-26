@@ -165,6 +165,28 @@ Body language comes from the network's styles: a wide `LegsApart` fencing stance
 
 The pointer is locked while you hold a button (**Esc** releases it). Add `?nolock` to the URL to keep the cursor free.
 
+### Enemy AI and the gauntlet (v8)
+
+Click **Start / stop gauntlet** in the panel for six waves of hostile fighters, from a lone Peasant up to the Baron and his man-at-arms. Each rank (Peasant, Militia, Squire, Man-at-arms, Knight, Baron) has its own health, aggression, block skill, hit power and grapple chance. Enemies are on team `enemy` and never hit each other. The top of the screen shows the wave, and each enemy has a health bar with its rank above it. A ⚔ marks the enemy currently allowed to attack.
+
+**Director** (`src/runtime/director.ts`) — coordinates the group so it doesn't mob you all at once:
+
+- **Attack tokens.** Only one or two enemies (depending on the wave) may commit to attacks or grapples at a time. The rest harass at middle range. Tokens go to the closest enemies and rotate every few seconds, but never in the middle of an attack.
+- **Surround slots.** Enemies spread evenly around you and keep their order around the circle, so they don't cross each other's paths.
+
+**What an enemy can do** (`src/runtime/dummy_ai.ts`), on top of the dummy's cuts, combos, feints, blocks, tackles and picking up weapons:
+
+- **Grapple.** It closes to arm's length and grabs with its free hand. If you're armed it goes for your sword wrist or the blade; if not, your collar or neck. Then it yanks rhythmically to disarm or throw you.
+- **Punch.** Disarmed with no sword nearby, it puts its fists up and throws alternating jabs.
+
+**Punches for everyone** (`src/runtime/combat.ts`): a free hand moving faster than 2.6 m/s into a body deals blunt damage, and a hard punch to the head staggers.
+
+**Getting grabbed.** A "Grabbed" bar appears. Shake the mouse hard to struggle and break free sooner.
+
+**Death.** An enemy killed in the gauntlet drops its sword and stays down (a "SLAIN" banner shows), and its body is cleared after a few seconds. Clear a wave and the next one arrives. If you die, press **R** to retry the gauntlet.
+
+`tools/preview/gauntlet.mjs` and `tools/preview/grapple.mjs` are headless checks for the waves and for enemy grapples.
+
 ## Run
 
 ```bash
@@ -191,7 +213,7 @@ The **Look** panel adjusts exposure, environment light, and the skin settings: p
 
 ## Version badge
 
-The number in the top middle of the page (for example `v6`) is `buildNumber` in `package.json`. Vite injects it at build time, so bump it with each release.
+The number in the top middle of the page (for example `v8`) is `buildNumber` in `package.json`. Vite injects it at build time, so bump it with each release.
 
 ## Tools
 

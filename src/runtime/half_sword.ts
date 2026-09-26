@@ -271,6 +271,8 @@ export class HalfSword {
   private readonly overrides: Record<HandSide, { pos: THREE.Vector3; closed: boolean } | null> = { Left: null, Right: null };
   /** Palm-centre world position per hand, from the last apply(). */
   private readonly gripPoints: Record<HandSide, THREE.Vector3> = { Left: new THREE.Vector3(), Right: new THREE.Vector3() };
+  private readonly prevGripPoints: Record<HandSide, THREE.Vector3 | null> = { Left: null, Right: null };
+  private readonly handVel: Record<HandSide, THREE.Vector3> = { Left: new THREE.Vector3(), Right: new THREE.Vector3() };
   private wasActive = false;
   /** Seconds left of a parry stun (hands can't drive the blade). */
   private stunTime = 0;
@@ -365,6 +367,8 @@ export class HalfSword {
     if (d.length() > r) out.copy(sh).addScaledVector(d.normalize(), r);
     return out;
   }
+  /** Palm-centre velocity (m/s), from the rendered poses. */
+  handVelocity(side: HandSide): THREE.Vector3 { return this.handVel[side].clone(); }
   /** Rendered palm-centre position (last apply()). */
   handPoint(side: HandSide, out = new THREE.Vector3()): THREE.Vector3 { return out.copy(this.gripPoints[side]); }
   /** Body-frame offset → world. */
@@ -428,6 +432,11 @@ export class HalfSword {
     if (!this.enabled || !this.haveBody) return;
     dt = Math.min(dt, 1 / 20);
     if (dt <= 1e-5) return;   // hit-stop freeze
+    for (const side of ["Left", "Right"] as HandSide[]) {
+      const prev = this.prevGripPoints[side];
+      if (prev) this.handVel[side].copy(this.gripPoints[side]).sub(prev).divideScalar(dt);
+      this.prevGripPoints[side] = this.gripPoints[side].clone();
+    }
     const main = this.mainSide, off = this.offSide;
     const held: Record<HandSide, boolean> = { Left: c.leftHeld, Right: c.rightHeld };
     const two = this.armed && held.Left && held.Right && !this.overrides[off] && !this.disabled[off];

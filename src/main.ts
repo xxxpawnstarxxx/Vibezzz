@@ -28,6 +28,8 @@ import { GrabController } from "./runtime/grab.js";
 import type { GrabEvent, GrabWorld } from "./runtime/grab.js";
 import type { HandSide } from "./runtime/half_sword.js";
 import type { DummyWorld } from "./runtime/dummy_ai.js";
+import { EnemyDirector, RANKS, WAVES } from "./runtime/director.js";
+import type { Rank } from "./runtime/director.js";
 import { freshLimbs } from "./runtime/combat.js";
 import type { Region } from "./runtime/combat.js";
 import { BodyColliders, CombatSystem, HitReactor } from "./runtime/combat.js";
@@ -203,6 +205,11 @@ async function boot() {
     if (mesh) setSwordBlood(mesh, (item.mesh.userData.blood as number) ?? 0);
   }
   function emitGrab(e: GrabEvent): void {
+    if (import.meta.env.DEV) {
+      const log = ((window as unknown as { __events?: unknown[] }).__events ??= []);
+      log.push({ k: e.kind, who: e.who.id });
+      if (log.length > 30) log.shift();
+    }
     if (e.kind === "grab") { sfx.tap(); popup(e.point, "GRAB", "grab"); }
     else if (e.kind === "throw") {
       sfx.hit(5, false); fx.shake(0.02); hitStop = Math.max(hitStop, 0.06);
@@ -237,6 +244,13 @@ async function boot() {
     },
   };
   let grabber: GrabController | null = null;
+  const director = new EnemyDirector();
+  /** Gauntlet (wave) mode state. */
+  const gauntlet = { active: false, wave: 0, phase: "idle" as "idle" | "fighting" | "cleared" | "dead" | "won", timer: 0 };
+  const removeAt = new Map<string, number>();   // dead enemy id → time to remove
+  let struggle = 0;
+  const barsEl = document.getElementById("enemy-bars");
+  const bars = new Map<string, HTMLDivElement>();
   /** Fighter heading in Half Sword mode — turned with Q / E; orbiting the
    *  camera (MMB) doesn't turn the fighter. */
   const hsHeading = new THREE.Vector3(0, 0, 1);
@@ -488,6 +502,7 @@ async function boot() {
       onSwapHands: () => halfSword.swapHands(),
       dummy: dummySettings,
       onSpawnDummy: () => spawnDummy(),
+      onGauntlet: () => (gauntlet.active ? stopGauntlet() : startGauntlet()),
       gore,
     },
     look: {
@@ -601,6 +616,9 @@ async function boot() {
       engine.removeAgent(r.agent);
       combat.remove(r.id);
     }
+    stopGauntlet();
+    for (const b of bars.values()) b.remove();
+    bars.clear();
     for (const d of dummies.values()) { scene.remove(d.mesh, d.trail.mesh); }
     dummies.clear();
     for (const it of items) scene.remove(it.mesh);
@@ -667,6 +685,7 @@ async function boot() {
     halfSword.reset();
     refreshOverrides();
     const me = playerId ? combat.fighters.get(playerId) : null;
+    if (me) me.team = "player";
     grabber = me ? new GrabController(me, halfSword, bipedEngine.rig.boneNameToIndex) : null;
   }
 
@@ -694,27 +713,181 @@ async function boot() {
   }
 
   /** Spawn a sword-wielding sparring dummy in front of the player. */
-  function spawnDummy(): void {
+  function spawnDummy(rank?: Rank, at?: Vec3): void {
     if (bipedEngine.agentCount >= MAX_AGENTS_PER_KIND) return;
     const player = playerId ? agents.get(playerId) : null;
     const base = player ? player.agent.getPosition() : [0, 0, 0];
     const dir = player ? hsHeading.clone() : new THREE.Vector3(0, 0, 1);
     const n = dummies.size;
     const side = new THREE.Vector3(-dir.z, 0, dir.x).multiplyScalar((n % 2 ? 1 : -1) * Math.ceil(n / 2) * 1.6);
-    const pos: Vec3 = [base[0] + dir.x * 2.0 + side.x, 0, base[2] + dir.z * 2.0 + side.z];
-    const agent = bipedEngine.createAgent({ position: pos, facing: [-dir.x, 0, -dir.z], style: "Neutral" });
+    const pos: Vec3 = at ?? [base[0] + dir.x * 2.0 + side.x, 0, base[2] + dir.z * 2.0 + side.z];
+    const face: Vec3 = [base[0] - pos[0], 0, base[2] - pos[2]];
+    const fl = Math.hypot(face[0], face[2]) || 1;
+    const agent = bipedEngine.createAgent({ position: pos, facing: [face[0] / fl, 0, face[2] / fl], style: "Neutral" });
     const id = `dummy-${++dummyCounter}`;
-    const label = `Dummy #${dummyCounter}`;
+    const label = rank ? `${rank.name}` : `Dummy #${dummyCounter}`;
     agents.set(id, { id, label, kind: "biped", agent, brain: null, dummy: true });
     const sword = new HalfSword(bipedEngine.rig);
     const fighter = addFighter(id, label, agent);
+    fighter.team = "enemy";
+    if (rank) { fighter.health = fighter.maxHealth = rank.health; }
     const ai = new DummyAI(fighter, sword);
-    ai.settings = dummySettings;
+    // Gauntlet enemies get their rank's own settings; sparring dummies share
+    // the panel's live settings.
+    ai.settings = rank ? { ...rank.settings } : dummySettings;
+    ai.grabber = new GrabController(fighter, sword, bipedEngine.rig.boneNameToIndex);
+    ai.grabWorld = grabWorld;
+    if (rank?.name === "Baron") fighter.damageScale = 1.2;
     const mesh = createSword();
     const trail = new BladeTrail(new THREE.Color(1.0, 0.88, 0.8));
     scene.add(mesh, trail.mesh);
     dummies.set(id, { id, ai, sword, mesh, trail });
     refreshOverrides();
+  }
+
+  /** Remove an enemy completely (gauntlet corpses, restarts). */
+  function removeEnemy(id: string): void {
+    const d = dummies.get(id);
+    const f = combat.fighters.get(id);
+    const r = agents.get(id);
+    if (f) {
+      if (f.sword?.armed) dropSword(f);
+      d?.ai.grabber?.releaseAll(grabWorld);
+      combat.releaseStuck(f);
+      wounds.clear(() => f.agent.actor.worldMatrices);
+      combat.remove(id);
+    }
+    if (r) bipedEngine.removeAgent(r.agent);
+    if (d) scene.remove(d.mesh, d.trail.mesh);
+    dummies.delete(id);
+    agents.delete(id);
+    removeAt.delete(id);
+    bars.get(id)?.remove();
+    bars.delete(id);
+  }
+
+  function clearEnemies(): void {
+    for (const id of [...dummies.keys()]) removeEnemy(id);
+    for (const it of items) scene.remove(it.mesh);
+    items.length = 0;
+  }
+
+  function spawnWave(index: number): void {
+    const wave = WAVES[index];
+    const player = playerId ? agents.get(playerId) : null;
+    const [px, , pz] = player ? player.agent.getPosition() : [0, 0, 0];
+    director.maxAttackers = wave.maxAttackers;
+    const n = wave.ranks.length;
+    const baseYaw = Math.atan2(hsHeading.x, hsHeading.z);
+    wave.ranks.forEach((ri, i) => {
+      const yaw = baseYaw + (n === 1 ? 0 : (i - (n - 1) / 2) * 0.9);
+      spawnDummy(RANKS[ri], [px + Math.sin(yaw) * 4.2, 0, pz + Math.cos(yaw) * 4.2]);
+    });
+    gauntlet.wave = index;
+    gauntlet.phase = "fighting";
+    const boss = wave.ranks.includes(RANKS.length - 1);
+    banner(boss ? "THE BARON" : `WAVE ${index + 1}`);
+    updateWaveLabel();
+  }
+
+  function startGauntlet(): void {
+    if (!halfSword.enabled) setHalfSword(true);
+    clearEnemies();
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    if (me) { me.health = me.maxHealth; me.limbs = freshLimbs(); me.downTime = 0; me.dead = false; }
+    if (!halfSword.armed && me) {
+      // Start armed.
+      const it = spawnLoose(halfSword.handPoint(halfSword.mainSide), new THREE.Quaternion());
+      pickUp(me, it, halfSword.mainSide);
+    }
+    gauntlet.active = true;
+    spawnWave(0);
+  }
+
+  function stopGauntlet(): void {
+    gauntlet.active = false;
+    gauntlet.phase = "idle";
+    updateWaveLabel();
+  }
+
+  function updateWaveLabel(): void {
+    const el = document.getElementById("wave-label");
+    if (!el) return;
+    el.textContent = gauntlet.active ? `Gauntlet · wave ${gauntlet.wave + 1} / ${WAVES.length}` : "";
+  }
+
+  /** Per-frame gauntlet rules: corpses stay down, waves advance. */
+  function updateGauntlet(dt: number): void {
+    const now = performance.now() / 1000;
+    for (const [id, t] of removeAt) if (now > t) removeEnemy(id);
+    if (!gauntlet.active) return;
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    // Any enemy at 0 health is dead in the gauntlet (however it got there).
+    for (const [id, d] of dummies) {
+      const f = combat.fighters.get(id);
+      if (!f || f.dead || f.health > 0) continue;
+      f.dead = true;
+      f.downTime = Math.max(f.downTime, 1);
+      if (f.sword?.armed) dropSword(f);
+      d.ai.grabber?.releaseAll(grabWorld);
+      removeAt.set(id, performance.now() / 1000 + 6);
+    }
+    if (gauntlet.phase === "fighting") {
+      if (me && me.downTime > 0) {
+        gauntlet.phase = "dead";
+        me.dead = true;
+        banner("YOU DIED — press R to retry");
+        return;
+      }
+      const alive = [...dummies.keys()].filter((id) => !combat.fighters.get(id)?.dead);
+      if (alive.length === 0) {
+        gauntlet.phase = gauntlet.wave >= WAVES.length - 1 ? "won" : "cleared";
+        gauntlet.timer = 4;
+        banner(gauntlet.phase === "won" ? "GAUNTLET COMPLETE — THE BARON FALLS" : `WAVE ${gauntlet.wave + 1} CLEARED`);
+        if (me) { me.health = Math.min(me.maxHealth, me.health + 45); me.limbs = freshLimbs(); }
+      }
+    } else if (gauntlet.phase === "cleared") {
+      gauntlet.timer -= dt;
+      if (gauntlet.timer <= 0) spawnWave(gauntlet.wave + 1);
+    }
+  }
+
+  /** Grabbed? Pull away (WASD) or shake the mouse to break the grip. */
+  function updateStruggle(dt: number, mouseSpeed: number): void {
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    const el = document.getElementById("grabbed-hint");
+    if (!me || (me.grabbedBy ?? 0) <= 0) { struggle = 0; el?.classList.remove("show"); return; }
+    const moving = ["w", "a", "s", "d"].some((k) => input.keys.has(k));
+    struggle += dt * ((moving ? 1.4 : 0.35) + Math.min(mouseSpeed / 900, 1.6));
+    el?.classList.add("show");
+    if (el) (el.querySelector(".fill") as HTMLElement).style.width = `${Math.min(100, struggle / 1.3 * 100)}%`;
+    if (struggle > 1.3) { me.breakFree = true; struggle = 0; }
+  }
+
+  function updateEnemyBars(): void {
+    if (!barsEl) return;
+    for (const [id, d] of dummies) {
+      const f = combat.fighters.get(id);
+      if (!f) continue;
+      let el = bars.get(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.className = "enemy-bar";
+        el.innerHTML = `<div class="name"></div><div class="track"><div class="fill"></div></div>`;
+        barsEl.appendChild(el);
+        bars.set(id, el);
+      }
+      const head = new THREE.Vector3().setFromMatrixPosition(f.agent.actor.worldMatrices[bipedEngine.rig.boneNameToIndex.get("Head")!] ?? new THREE.Matrix4());
+      const v = head.add(new THREE.Vector3(0, 0.38, 0)).project(camera);
+      const visible = v.z < 1 && Math.abs(v.x) < 1.1 && Math.abs(v.y) < 1.1 && !f.dead;
+      el.style.display = visible ? "" : "none";
+      if (!visible) continue;
+      el.style.left = `${(v.x * 0.5 + 0.5) * window.innerWidth}px`;
+      el.style.top = `${(-v.y * 0.5 + 0.5) * window.innerHeight}px`;
+      (el.querySelector(".fill") as HTMLElement).style.width = `${(f.health / f.maxHealth) * 100}%`;
+      const tag = d.ai.orders.canAttack ? "⚔ " : "";
+      (el.querySelector(".name") as HTMLElement).textContent = `${tag}${f.label}${d.ai.berserk ? " · BERSERK" : ""}${!d.sword.armed ? " · unarmed" : ""}`;
+    }
   }
 
   // --- combat feedback -----------------------------------------------------
@@ -784,7 +957,7 @@ async function boot() {
           const m = heldMesh(e.attacker);
           if (m) setSwordBlood(m, (m.userData.blood as number) + 0.12 * gore.bloodRate);
         }
-        const label = e.module === "hilt" ? "POMMEL" : e.thrust ? "THRUST" : e.zone === "head" ? "HEAD" : e.zone === "neck" ? "NECK" : "";
+        const label = e.module === "fist" ? "PUNCH" : e.module === "hilt" ? "POMMEL" : e.thrust ? "THRUST" : e.zone === "head" ? "HEAD" : e.zone === "neck" ? "NECK" : "";
         popup(e.point, `${label ? label + " " : ""}${e.damage}`, e.target.id === playerId ? "taken" : e.zone === "head" || e.zone === "neck" ? "crit" : "");
         if (e.target.id === playerId && hud.vignette) {
           hud.vignette.classList.remove("flash");
@@ -820,6 +993,12 @@ async function boot() {
         sfx.hit(7, false);
       } else if (e.kind === "parried") {
         popup(e.point, e.defender.id === playerId ? "PARRIED — RIPOSTE!" : "PARRIED", e.attacker.id === playerId ? "taken" : "parry");
+      } else if (e.kind === "down" && gauntlet.active && e.target.team === "enemy") {
+        e.target.dead = true;
+        if (e.target.sword?.armed) dropSword(e.target);
+        dummies.get(e.target.id)?.ai.grabber?.releaseAll(grabWorld);
+        removeAt.set(e.target.id, performance.now() / 1000 + 6);
+        banner(`${e.target.label.toUpperCase()} SLAIN`);
       } else if (e.kind === "down") {
         banner(e.target.id === playerId ? "YOU ARE DOWN" : `${e.target.label.toUpperCase()} DOWN`);
       }
@@ -902,6 +1081,7 @@ async function boot() {
 
   function updateHalfSword(dt: number): void {
     const controls_ = halfSwordInput.consume();
+    updateStruggle(dt, Math.hypot(controls_.dx, controls_.dy) / Math.max(dt, 1e-3));
     const me = playerId ? combat.fighters.get(playerId) : null;
     if (me && me.downTime > 0) {
       controls_.leftHeld = controls_.rightHeld = controls_.thrust = false;
@@ -960,6 +1140,7 @@ async function boot() {
       || t.tagName === "SELECT" || t.isContentEditable)) return;
     const k = e.key.toLowerCase();
     if (k === "h") setHalfSword(!halfSword.enabled);
+    else if (k === "r" && gauntlet.active && gauntlet.phase === "dead") startGauntlet();
     else if (halfSword.enabled && k === "x" && halfSword.armed) halfSword.swapHands();
     else if (halfSword.enabled && k === "f") {
       const me = playerId ? combat.fighters.get(playerId) : null;
@@ -1049,7 +1230,7 @@ async function boot() {
   if (import.meta.env.DEV) {
     (window as unknown as { __vibezzz: unknown }).__vibezzz = {
       camera, controls, agents, get playerId() { return playerId; },
-      combat, combatStats, dummies, items, get grabber() { return grabber; }, halfSword, hsHeading, dropSword,
+      combat, combatStats, dummies, items, get grabber() { return grabber; }, halfSword, hsHeading, dropSword, gauntlet, startGauntlet, director,
     };
   }
 
@@ -1082,7 +1263,13 @@ async function boot() {
     combat.playerDamageRate = gore.playerDamage;
     combat.npcDamageRate = gore.enemyDamage;
     fx.bloodRate = gore.bloodRate;
+    director.update(dt, [...dummies.values()].map((d) => ({
+      id: d.id, ai: d.ai,
+      position: () => agents.get(d.id)!.agent.getPosition(),
+      alive: () => { const f = combat.fighters.get(d.id); return !!f && !f.dead && f.downTime <= 0; },
+    })), me ? me.agent.getPosition() : null);
     for (const d of dummies.values()) d.ai.update(dt, me, dummyWorld);
+    updateGauntlet(dt);
     for (const it of items) { it.step(dt); it.sync(); }
     for (const f of combat.fighters.values()) f.reactor.update(dt);
 
@@ -1111,6 +1298,7 @@ async function boot() {
     for (const d of dummies.values()) showSword(d.mesh, d.sword, d.trail, d.id);
     wounds.mesh.visible = gore.bloodRate > 0;
     wounds.update();
+    updateEnemyBars();
     updateHud();
     if (bannerTimer > 0) bannerTimer -= realDt;
     renderer.render(scene, camera);

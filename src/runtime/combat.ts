@@ -225,6 +225,10 @@ export interface Fighter {
   parried?: number;
   /** Seconds left of the riposte window after a strong parry. */
   riposte?: number;
+  /** Fighters on the same team can't hurt or grab each other. */
+  team?: string;
+  /** Permanently down (gauntlet): no recovery. */
+  dead?: boolean;
 }
 
 /** A blade stuck in a body (Constraint_Weapon_Stuck_BP): pinned to a bone,
@@ -245,7 +249,7 @@ export type CombatEvent =
   | { kind: "hit"; attacker: Fighter; target: Fighter; point: THREE.Vector3; dir: THREE.Vector3;
       speed: number; damage: number; zone: Zone; thrust: boolean;
       /** Which damage channel dominated (Deal Complex Damage's three channels). */
-      channel: "cut" | "stab" | "blunt"; module: "blade" | "hilt"; region: Region; bone: number; edge: number }
+      channel: "cut" | "stab" | "blunt"; module: "blade" | "hilt" | "fist"; region: Region; bone: number; edge: number }
   | { kind: "parry"; a: Fighter; b: Fighter; point: THREE.Vector3; normal: THREE.Vector3; speed: number }
   | { kind: "graze"; attacker: Fighter; target: Fighter; point: THREE.Vector3; speed: number }
   | { kind: "down"; target: Fighter }
@@ -291,7 +295,8 @@ export class CombatSystem {
       if (f.push) f.push.multiplyScalar(Math.exp(-dt * 5));
       if (f.downTime > 0) {
         f.downTime -= dt;
-        if (f.downTime <= 0) { f.health = f.maxHealth; f.limbs = freshLimbs(); }
+        if (f.dead) f.downTime = Math.max(f.downTime, 1);
+        else if (f.downTime <= 0) { f.health = f.maxHealth; f.limbs = freshLimbs(); }
       }
     }
 
@@ -397,7 +402,7 @@ export class CombatSystem {
       for (let k = 1; k <= SUB && !best; k++) {
         const b = at(sa, k / SUB);
         for (const T of list) {
-          if (T === A || T.holdingBladeOf === A.id) continue;
+          if (T === A || T.holdingBladeOf === A.id || (A.team && A.team === T.team)) continue;
           if (this.stuck.some((st) => st.attacker === A)) continue;
           for (const cap of T.capsules) {
             const { s, dist2 } = closestSegSeg(b.g, b.t, cap.a, cap.b, c1, c2);
@@ -437,7 +442,7 @@ export class CombatSystem {
       A.sword!.hiltSegment(p, g);
       const vg = A.sword!.gripVelocity();
       for (const T of list) {
-        if (T === A) continue;
+        if (T === A || (A.team && A.team === T.team)) continue;
         for (const cap of T.capsules) {
           const { dist2 } = closestSegSeg(p, g, cap.a, cap.b, c1, c2);
           const r = cap.r + 0.03;
@@ -446,6 +451,40 @@ export class CombatSystem {
           const vn = vg.dot(n);
           if (vn < 0) A.sword!.impulseGrip(n.clone().multiplyScalar(-vn * 0.8));
           this.resolveHit(A, T, cap, 0, vg, n.clone().negate(), Math.max(-vn, 0), c1.clone().lerp(c2, 0.5), n, "hilt", events);
+          break;
+        }
+      }
+    }
+
+    // --- fists: a free hand moving fast into a body is a punch --------------
+    for (const A of list) {
+      const hs = A.sword;
+      if (!hs?.active || A.downTime > 0 || (A.stagger ?? 0) > 0) continue;
+      for (const side of ["Left", "Right"] as const) {
+        if (hs.handOnSword(side) || hs.hasOverride(side) || hs.disabled[side]) continue;
+        const hv = hs.handVelocity(side);
+        const sp = hv.length();
+        if (sp < 2.6) continue;
+        const hp = hs.handPoint(side);
+        for (const T of list) {
+          if (T === A || (A.team && A.team === T.team)) continue;
+          let hitCap: Capsule | null = null;
+          for (const cap of T.capsules) {
+            const ab = cap.b.clone().sub(cap.a);
+            const u = THREE.MathUtils.clamp(hp.clone().sub(cap.a).dot(ab) / ab.lengthSq(), 0, 1);
+            if (cap.a.clone().addScaledVector(ab, u).distanceTo(hp) < cap.r + 0.05) { hitCap = cap; break; }
+          }
+          if (!hitCap || !this.ready(`f:${A.id}:${side}:${T.id}`, 0.4) || T.downTime > 0) continue;
+          const rate = A.id === this.playerId ? this.playerDamageRate : this.npcDamageRate;
+          const damage = Math.max(1, Math.round(ZONE_DAMAGE[hitCap.zone] * THREE.MathUtils.clamp((sp - 2) * 3.2, 2, 14) * rate));
+          const dir = hv.clone().normalize();
+          T.health = Math.max(0, T.health - damage);
+          T.reactor.impulse(dir, Math.min(1.5 + sp * 0.5, 5));
+          events.push({ kind: "hit", attacker: A, target: T, point: hp.clone(), dir, speed: sp, damage, zone: hitCap.zone,
+            thrust: false, channel: "blunt", module: "fist", region: hitCap.region, bone: hitCap.bone, edge: 0 });
+          this.damageRegion(T, hitCap.region, damage * 0.6, hp, events);
+          if (hitCap.zone === "head" && sp > 5 && T.downTime <= 0) T.stagger = Math.max(T.stagger ?? 0, 0.6);
+          if (T.health <= 0 && T.downTime <= 0) { T.downTime = 3.5; events.push({ kind: "down", target: T }); }
           break;
         }
       }

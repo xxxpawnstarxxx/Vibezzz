@@ -39,6 +39,7 @@ interface Candidate {
   label: string;
   /** Items on the floor are reached by stooping, with a generous magnet. */
   low?: boolean;
+  part?: string;
 }
 
 export type GrabEvent =
@@ -63,6 +64,10 @@ export interface GrabInput {
   grab: Record<HandSide, boolean>;
   /** Mouse button for that hand held (aiming the hand). */
   aim: Record<HandSide, boolean>;
+  /** AI: explicit world-space hand goal (reach / yank), overrides aim. */
+  point?: Partial<Record<HandSide, THREE.Vector3 | null>>;
+  /** AI: rank candidates (higher = preferred); -Infinity to skip. */
+  prefer?: (label: string, part: string) => number;
 }
 
 export class GrabController {
@@ -70,6 +75,9 @@ export class GrabController {
   private readonly prevDesired: Record<HandSide, THREE.Vector3 | null> = { Left: null, Right: null };
   private disarmCooldown = 0;
   private readonly bone: (n: string) => number;
+
+  /** Which fighters this hand may grab (e.g. not teammates). */
+  canGrab: (T: Fighter) => boolean = (T) => !this.self.team || T.team !== this.self.team;
 
   constructor(readonly self: Fighter, readonly hs: HalfSword, boneNameToIndex: ReadonlyMap<string, number>) {
     this.bone = (n) => {
@@ -86,6 +94,12 @@ export class GrabController {
     if (h.kind === "item") return this.hs.armed && this.hs.mainSide !== side ? "carrying a sword" : "sword";
     if (h.kind === "blade") return `${h.target.label}'s blade`;
     return `${h.target.label}'s ${h.part}`;
+  }
+
+  /** World position of what `side` is holding (null if nothing). */
+  holdPoint(side: HandSide): THREE.Vector3 | null {
+    const h = this.holds[side];
+    return h ? this.holdPosition(h) : null;
   }
 
   releaseAll(world: GrabWorld): void {
@@ -113,7 +127,10 @@ export class GrabController {
       // Where the player wants the hand.
       let desired: THREE.Vector3;
       const hold = this.holds[side];
-      if (input.aim[side]) {
+      const aiPoint = input.point?.[side];
+      if (aiPoint) {
+        desired = aiPoint.clone();
+      } else if (input.aim[side]) {
         desired = hs.handTarget(side);
       } else if (hold) {
         desired = this.holdPosition(hold) ?? hs.handTarget(side);
@@ -129,9 +146,12 @@ export class GrabController {
         for (const c of cands) {
           const fromShoulder = c.pos.distanceTo(shoulder);
           if (!c.low && fromShoulder > reach * 1.05) continue;
-          // Aimed: snap only to things near the aim point. Auto: nearest.
-          const d = input.aim[side] ? c.pos.distanceTo(desired) : c.pos.distanceTo(shoulder);
-          const limit = input.aim[side] ? 0.24 : Infinity;
+          // Aimed: snap only to things near the aim point. Auto: nearest
+          // (AI: best by its preference, then nearest).
+          const pref = input.prefer ? input.prefer(c.label, c.part ?? "") : 0;
+          if (pref === -Infinity) continue;
+          const d = (input.aim[side] ? c.pos.distanceTo(desired) : c.pos.distanceTo(shoulder)) - pref;
+          const limit = input.aim[side] && !input.prefer ? 0.24 : Infinity;
           if (c.low) {
             // Floor items: horizontal distance from the reaching hand.
             const dh = Math.hypot(c.pos.x - shoulder.x, c.pos.z - shoulder.z);
@@ -311,7 +331,7 @@ export class GrabController {
     const out: Candidate[] = [];
     const shoulder = this.hs.shoulderPosition(side);
     for (const T of world.fighters) {
-      if (T === this.self) continue;
+      if (T === this.self || !this.canGrab(T) || T.dead) continue;
       const w = T.agent.actor.worldMatrices;
       if (!w || w.length === 0) continue;
       const P = (n: string) => new THREE.Vector3().setFromMatrixPosition(w[this.bone(n)]);
@@ -319,7 +339,7 @@ export class GrabController {
         const bi = this.bone(boneName);
         const local = pos.clone().applyMatrix4(w[bi].clone().invert());
         out.push({
-          pos, label: `${T.label}'s ${part}`,
+          pos, label: `${T.label}'s ${part}`, part,
           make: () => ({ kind: "body", target: T, bone: bi, local, part, side: s, t: 0 }),
         });
       };
@@ -340,7 +360,7 @@ export class GrabController {
         const ab = t.clone().sub(g);
         const u = THREE.MathUtils.clamp(shoulder.clone().sub(g).dot(ab) / ab.lengthSq(), 0.15, 0.95);
         out.push({
-          pos: g.clone().addScaledVector(ab, u), label: `${T.label}'s blade`,
+          pos: g.clone().addScaledVector(ab, u), label: `${T.label}'s blade`, part: "blade",
           make: () => ({ kind: "blade", target: T, along: u, t: 0 }),
         });
       }
@@ -348,7 +368,7 @@ export class GrabController {
     for (const item of world.items) {
       if (item.heldBy || item.cooldown > 0) continue;
       const pos = item.gripPoint();
-      out.push({ pos, label: "sword", low: pos.y < 0.5, make: () => ({ kind: "item", item, t: 0 }) });
+      out.push({ pos, label: "sword", part: "item", low: pos.y < 0.5, make: () => ({ kind: "item", item, t: 0 }) });
     }
     return out;
   }
