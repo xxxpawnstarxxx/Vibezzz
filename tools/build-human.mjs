@@ -240,6 +240,19 @@ function mapJoint(n) {
   throw new Error(`unmapped human joint ${n}`);
 }
 
+/** Forearm roll: Geno's `*ArmEnd` joints sit at the elbow under the forearm
+ *  and are unused by Geno's own mesh. The runtime drives them with a share
+ *  of the hand's twist (see src/runtime/driven_joints.ts), so forearm
+ *  weights fade onto them from elbow (0) to wrist (1). */
+const TWIST_SPLIT = new Map(["Left", "Right"].map((Side) => [`${Side}ForeArm`, {
+  helper: `${Side}ArmEnd`, a: gPos(`${Side}ForeArm`), b: gPos(`${Side}Hand`),
+}]));
+function twistShare(split, q) {
+  const ab = split.b.clone().sub(split.a);
+  const t = THREE.MathUtils.clamp(q.clone().sub(split.a).dot(ab) / ab.lengthSq(), 0, 1);
+  return THREE.MathUtils.smoothstep(t, 0.0, 1.0);
+}
+
 /** Split a torso weight across Geno's spine by the conformed vertex height.
  *  Piecewise-linear between segment midpoints, so weights are continuous
  *  (a vertex at the middle of a spine segment belongs 100% to that bone). */
@@ -362,7 +375,14 @@ function convertPrimitive(prim, opts = {}) {
       if (TORSO.has(name)) torsoSplit(q.y, w / wsum, acc);
       else {
         const g = mapJoint(name);
-        acc.set(g, (acc.get(g) ?? 0) + w / wsum);
+        const split = TWIST_SPLIT.get(g);
+        if (split) {
+          const sh = twistShare(split, q);
+          acc.set(g, (acc.get(g) ?? 0) + (w / wsum) * (1 - sh));
+          acc.set(split.helper, (acc.get(split.helper) ?? 0) + (w / wsum) * sh);
+        } else {
+          acc.set(g, (acc.get(g) ?? 0) + w / wsum);
+        }
       }
     }
     weightMaps.push(acc);

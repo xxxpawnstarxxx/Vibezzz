@@ -7,8 +7,12 @@
  *  When a `Touch` source is supplied and its left stick is active, the
  *  movement / sprint / quadruped-gait queries derive from stick magnitude
  *  instead of keys. Likewise the right stick stands in for LMB-drag facing.
+ *  A connected gamepad (see gamepad.ts) is consulted after touch and before
+ *  keyboard / mouse.
  */
 import type { Touch } from "./touch.js";
+import { PAD } from "./gamepad.js";
+import type { GamepadInput } from "./gamepad.js";
 
 export type QuadrupedGait = "walk" | "pace" | "trot" | "canter";
 export type QuadrupedAction = "sit" | "stand" | "lie" | null;
@@ -22,9 +26,11 @@ export class Input {
   stylePrev = false;
   styleNext = false;
   private touch?: Touch;
+  private pad?: GamepadInput;
 
-  constructor(target: HTMLElement, touch?: Touch) {
+  constructor(target: HTMLElement, touch?: Touch, pad?: GamepadInput) {
     this.touch = touch;
+    this.pad = pad;
     // Keys go on window so WASD works without first clicking the canvas —
     // overlay UIs (joystick, tweakpane) eat clicks otherwise. Skip events
     // whose target is a form input so users can still type into Tweakpane.
@@ -70,6 +76,7 @@ export class Input {
       const [sx, sy] = this.touch.leftStick;
       return [sx, -sy];
     }
+    if (this.pad?.moving) return [this.pad.move[0], this.pad.move[1]];
     const k = this.keys;
     let x = 0, z = 0;
     if (k.has("w")) z += 1;
@@ -83,6 +90,7 @@ export class Input {
    *  continuously when sprint is on, so partial deflection still walks). */
   isSprint(): boolean {
     if (this.touch?.leftActive) return true;
+    if (this.pad?.moving) return this.pad.sprint > 0.5;
     return this.keys.has("shift");
   }
 
@@ -93,6 +101,7 @@ export class Input {
       const [sx, sy] = this.touch.rightStick;
       return [sx, -sy];
     }
+    if (this.pad?.looking) return [this.pad.look[0], this.pad.look[1]];
     if (!this.facingMouseDown) return [0, 0];
     const pos: [number, number] = [this.mouseX, this.mouseY];
     if (!this.directionMouseStart) {
@@ -105,8 +114,16 @@ export class Input {
     return [pos[0] - this.directionMouseStart[0], this.directionMouseStart[1] - pos[1]];
   }
 
-  consumeStylePrev(): boolean { const v = this.stylePrev; this.stylePrev = false; return v; }
-  consumeStyleNext(): boolean { const v = this.styleNext; this.styleNext = false; return v; }
+  consumeStylePrev(): boolean {
+    const v = this.stylePrev || (this.pad?.consume(PAD.LB) ?? false);
+    this.stylePrev = false;
+    return v;
+  }
+  consumeStyleNext(): boolean {
+    const v = this.styleNext || (this.pad?.consume(PAD.RB) ?? false);
+    this.styleNext = false;
+    return v;
+  }
 
   // --- Quadruped-specific ------------------------------------------------
 
@@ -120,6 +137,11 @@ export class Input {
       if (m < 0.70) return "pace";
       return "trot";
     }
+    if (this.pad?.moving) {
+      if (this.pad.sprint > 0.5) return "canter";
+      if (this.pad.slow > 0.5) return "walk";
+      return this.pad.moveMagnitude < 0.6 ? "pace" : "trot";
+    }
     const k = this.keys;
     if (k.has("alt")) return "walk";
     if (k.has("control")) return "trot";
@@ -127,8 +149,12 @@ export class Input {
     return "pace";
   }
 
-  /** Action posture — R (Sit), T (Stand), V (Lie). None when no key held. */
+  /** Action posture — R (Sit), T (Stand), V (Lie), or pad A / B / X. None
+   *  when nothing is held. */
   getQuadrupedAction(): QuadrupedAction {
+    if (this.pad?.isHeld(PAD.A)) return "sit";
+    if (this.pad?.isHeld(PAD.B)) return "stand";
+    if (this.pad?.isHeld(PAD.X)) return "lie";
     if (this.keys.has("r")) return "sit";
     if (this.keys.has("t")) return "stand";
     if (this.keys.has("v")) return "lie";

@@ -30,3 +30,26 @@ Third-party assets
 licensed CC BY 4.0:
 
     https://sketchfab.com/3d-models/simple-studio-light-771d351d2329444fab348909ebfd160b
+
+Vibezzz
+=======
+
+Vibezzz extends ai4anim-webgpu. Additional material:
+
+`public/assets/human.glb`, `public/textures/human/*` — derived by
+`tools/build-human.mjs` from the human model and skin textures of the
+vibe-human project (https://github.com/xxxpawnstarxxx/vibe-human),
+re-skinned onto the Geno skeleton. `src/render/skin.ts` adapts
+vibe-human's TSL skin / eye materials.
+
+`public/assets/env/potsdamer_platz_1k.hdr` — "Potsdamer Platz" HDRI from
+Poly Haven (https://polyhaven.com/a/potsdamer_platz), CC0.
+
+`src/runtime/driven_joints.ts` — twist extraction follows the approach of
+RigLogic's twist/swing joint evaluator in OpenRigLogic
+(https://github.com/EpicGames/OpenRigLogic), Copyright (c) 2026 Epic
+Games, Inc., MIT License.
+
+Gamepad teleop (inspired by the joystick velocity-command teleop in
+NVIDIA GR00T-WholeBodyControl, Apache-2.0) and tap-to-select (inspired
+by Human Atlas, MIT) are original implementations; no code was copied.

@@ -37,6 +37,7 @@
 export { NMMEngine } from "./NMMEngine.js";
 export type { NMMEngineOptions } from "./NMMEngine.js";
 export type { RigMaterialFactory } from "./SharedSkinnedMesh.js";
+export type { DrivenJointSpec } from "../runtime/driven_joints.js";
 export { NMMAgent } from "./NMMAgent.js";
 export type { NMMAgentOptions } from "./NMMAgent.js";
 export type { WeightPrecision } from "../inference/Inference.js";

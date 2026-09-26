@@ -3,6 +3,8 @@
  *  by the inference pipeline; syncs to Three.js bones afterwards.
  */
 import * as THREE from "three";
+import { evaluateDrivenJoints } from "./driven_joints.js";
+import type { DrivenJoint } from "./driven_joints.js";
 import * as M from "../math/mat4.js";
 import * as Q from "../math/quat.js";
 import * as V from "../math/vec3.js";
@@ -157,6 +159,9 @@ export class Actor {
   /** `boneInverses[skelIdx]` per skeleton bone — shared template data. */
   private boneInverses: readonly THREE.Matrix4[] = [];
 
+  /** Corrective twist / follow joints — shared template data. */
+  private drivenJoints: readonly DrivenJoint[] = [];
+
   /** Per-agent scratch: one Matrix4 per skeleton bone for the per-frame
    *  world-matrix computation. Allocated once in {@link attachToRig}. */
   private scratchWorld: THREE.Matrix4[] = [];
@@ -200,6 +205,10 @@ export class Actor {
       }
     }
 
+    // Phase 2b: driven (corrective) joints — rotate helper joints from the
+    // pose just computed (RigLogic-style twist / follow behaviours).
+    if (this.drivenJoints.length > 0) evaluateDrivenJoints(world, this.drivenJoints);
+
     // Phase 3: fold in boneInverses and write into shared storage.
     const offset = _tmpOffset;
     for (let k = 0; k < world.length; k++) {
@@ -222,6 +231,7 @@ export class Actor {
     untrackedCascade: readonly { skelIdx: number; parentSkelIdx: number }[];
     bindLocalMatrices: readonly THREE.Matrix4[];
     boneInverses: readonly THREE.Matrix4[];
+    drivenJoints?: readonly DrivenJoint[];
   }): void {
     this.trackedSkelIdx = new Int32Array(this.threeBones.length);
     for (let i = 0; i < this.threeBones.length; i++) {
@@ -235,6 +245,7 @@ export class Actor {
     this.untrackedCascade = rig.untrackedCascade;
     this.bindLocalMatrices = rig.bindLocalMatrices;
     this.boneInverses = rig.boneInverses;
+    this.drivenJoints = rig.drivenJoints ?? [];
     this.scratchWorld = Array.from({ length: rig.totalBones }, () => new THREE.Matrix4());
   }
 

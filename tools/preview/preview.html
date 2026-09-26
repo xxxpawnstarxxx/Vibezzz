@@ -3,6 +3,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { compileDrivenJoints, evaluateDrivenJoints } from "/src/runtime/driven_joints.ts";
 const q = new URLSearchParams(location.search);
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setSize(innerWidth, innerHeight); renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -45,7 +46,33 @@ for (const [url, x] of [["/assets/human.glb", q.get("solo") ? 0 : -0.7], ...(q.g
     b("Spine1").rotateX(0.3); b("Spine3").rotateY(0.4); b("Head").rotateY(0.5); b("Neck").rotateX(0.3);
     b("LeftHand").rotateZ(0.6); b("RightHand").rotateX(0.8); b("LeftHandIndex1").rotateZ(0.8);
   }
+  if (q.get("twist")) {
+    // Twist the left hand about the forearm axis, optionally with driven joints.
+    const hand = g.scene.getObjectByName("LeftHand");
+    const axis = hand.position.clone().normalize(); // hand offset in forearm frame
+    hand.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, +q.get("twist")));
+  }
   scene.add(g.scene);
+  if (q.get("driven") === "1") {
+    g.scene.updateMatrixWorld(true);
+    g.scene.traverse(o => {
+      if (!o.isSkinnedMesh || o.userData.done) return;
+      const sk = o.skeleton; const names = new Map(sk.bones.map((b, i) => [b.name, i]));
+      const dj = compileDrivenJoints([
+        { kind: "twist", output: "LeftArmEnd", parent: "LeftForeArm", driver: "LeftHand", weight: 0.8 },
+        { kind: "follow", output: "Neck1", driver: "Head", weight: 0.5 },
+      ], names, sk.boneInverses);
+      const world = sk.bones.map(b => b.matrixWorld.clone());
+      evaluateDrivenJoints(world, dj);
+      // Push results back as local transforms.
+      for (const j of dj) {
+        const b = sk.bones[j.out];
+        const local = b.parent.matrixWorld.clone().invert().multiply(world[j.out]);
+        local.decompose(b.position, b.quaternion, b.scale);
+      }
+      sk.bones.forEach(b => (o.userData.done = true));
+    });
+  }
   if (q.get("probe")) {
     g.scene.updateMatrixWorld(true);
     g.scene.traverse(o => { if (!o.isSkinnedMesh) return;

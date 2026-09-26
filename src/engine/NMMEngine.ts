@@ -37,6 +37,7 @@ import { NMMAgent } from "./NMMAgent.js";
 import type { NMMAgentOptions } from "./NMMAgent.js";
 import { createSharedSkinnedRig } from "./SharedSkinnedMesh.js";
 import type { SharedSkinnedRig, RigMaterialFactory } from "./SharedSkinnedMesh.js";
+import type { DrivenJointSpec } from "../runtime/driven_joints.js";
 
 export interface NMMEngineOptions {
   renderer: WebGPURenderer;
@@ -49,6 +50,9 @@ export interface NMMEngineOptions {
   characterGlbUrl: string;
   /** Optional per-material shading override (see `RigMaterialFactory`). */
   materialFactory?: RigMaterialFactory;
+  /** Optional corrective joints (twist / follow) evaluated per agent after
+   *  the network's pose — see `runtime/driven_joints.ts`. */
+  drivenJoints?: readonly DrivenJointSpec[];
   /** Maximum simultaneous characters. Storage buffers are sized for this. */
   maxAgents: number;
   /** Which bundle to load. Default `biped`. */
@@ -93,7 +97,7 @@ export class NMMEngine {
       .parent_names;
     const rig = createSharedSkinnedRig(
       templateMesh, opts.maxAgents, bundle.meta.skeleton.bone_names, parentNames,
-      opts.materialFactory,
+      { materialFactory: opts.materialFactory, drivenJoints: opts.drivenJoints },
     );
 
     const inference = await Inference.create(bundle, opts.renderer, {

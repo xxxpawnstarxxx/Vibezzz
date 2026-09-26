@@ -189,6 +189,9 @@ function skinMaterial(src: THREE.MeshStandardMaterial, m: SkinMaps, uniforms: Sk
   mx.thicknessScaleNode = u.subsurface.mul(2.4);
 
   mat.metalness = 0;
+  // Like vibe-human: deep folds (armpits, hunched shoulders) can expose
+  // back faces, which would otherwise render as black slivers.
+  mat.side = THREE.DoubleSide;
   mat.ior = 1.4;
   mat.sheen = 0.02;
   mat.clearcoat = 0.02;

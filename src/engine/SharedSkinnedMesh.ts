@@ -26,6 +26,8 @@ import * as THREE from "three";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import * as TSL from "three/tsl";
 import { StorageBufferAttribute, MeshStandardNodeMaterial } from "three/webgpu";
+import { compileDrivenJoints } from "../runtime/driven_joints.js";
+import type { DrivenJoint, DrivenJointSpec } from "../runtime/driven_joints.js";
 
 const {
   Fn, attribute, instanceIndex, normalLocal, storage, tangentLocal, uint,
@@ -72,6 +74,15 @@ export interface SharedSkinnedRig {
    *  Shared by every agent — they're read-only (kinematic math writes into
    *  the shared storage buffer instead of touching these bones). */
   trackedBones: THREE.Bone[];
+  /** Corrective joints evaluated after each agent's pose (may be empty). */
+  drivenJoints: DrivenJoint[];
+}
+
+export interface SharedSkinnedRigOptions {
+  /** Per-material shading override. */
+  materialFactory?: RigMaterialFactory;
+  /** Twist / follow helper joints (see runtime/driven_joints.ts). */
+  drivenJoints?: readonly DrivenJointSpec[];
 }
 
 /** Builds the node material for one of the template's source materials.
@@ -91,15 +102,16 @@ export type RigMaterialFactory = (source: THREE.Material, index: number) => Mesh
  *
  *  The template may carry a material array + geometry groups (multi-material
  *  characters: skin / head / eyes). Every material gets its own copy of the
- *  skinning nodes; `materialFactory` optionally replaces the default
+ *  skinning nodes; `options.materialFactory` optionally replaces the default
  *  MeshStandard-style conversion per material. */
 export function createSharedSkinnedRig(
   template: THREE.SkinnedMesh,
   maxAgents: number,
   trackedBoneNames: readonly string[],
   trackedParentNames?: readonly (string | null)[],
-  materialFactory?: RigMaterialFactory,
+  options: SharedSkinnedRigOptions = {},
 ): SharedSkinnedRig {
+  const { materialFactory } = options;
   // Walk the template scene graph so we can find non-skinning "leaf marker"
   // bones too. Some rigs (Dog.glb) have sites (e.g. HeadSite) that the
   // network expects but that aren't in `skeleton.bones` — we still need their
@@ -325,6 +337,7 @@ export function createSharedSkinnedRig(
     untrackedCascade,
     templateRoot,
     trackedBones,
+    drivenJoints: compileDrivenJoints(options.drivenJoints ?? [], boneNameToIndex, boneInverses),
   };
 }
 

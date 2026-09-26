@@ -13,12 +13,13 @@
  */
 import * as THREE from "three";
 import { NMMEngine } from "./engine/index.js";
-import type { NMMAgent } from "./engine/index.js";
+import type { NMMAgent, DrivenJointSpec } from "./engine/index.js";
 import { makeScene, loadEnvironment } from "./render/scene.js";
 import { createHumanMaterialFactory, DEFAULT_SKIN } from "./render/skin.js";
 import type { SkinUniforms } from "./render/skin.js";
 import { Input } from "./input.js";
 import { Touch } from "./touch.js";
+import { GamepadInput, PAD } from "./gamepad.js";
 import { Debug } from "./render/debug.js";
 import { UI } from "./render/ui.js";
 import type { DirectionalLightParams, LookParams } from "./render/ui.js";
@@ -45,6 +46,16 @@ const CHARACTERS = {
   geno: { label: "Geno (mannequin)", glb: "/assets/geno.glb" },
 } as const;
 type CharacterId = keyof typeof CHARACTERS;
+
+/** Corrective joints layered on the network's 23-joint pose (RigLogic-style
+ *  twist / follow behaviours). Forearm roll helpers only affect meshes that
+ *  weight them (the realistic human); Neck1 splits head motion across the
+ *  neck for both characters. */
+const BIPED_DRIVEN_JOINTS: DrivenJointSpec[] = [
+  { kind: "twist", output: "LeftArmEnd", parent: "LeftForeArm", driver: "LeftHand", weight: 0.8 },
+  { kind: "twist", output: "RightArmEnd", parent: "RightForeArm", driver: "RightHand", weight: 0.8 },
+  { kind: "follow", output: "Neck1", driver: "Head", weight: 0.5 },
+];
 const PLAYFIELD_RADIUS = 12;
 const LOCOMOTION_SPEED = {
   walk: 0.7, pace: 1.2, trot: 2.0, canter: 4.0,
@@ -91,6 +102,7 @@ async function boot() {
       renderer, bundleBaseUrl: "/", characterGlbUrl: CHARACTERS[character].glb,
       maxAgents: MAX_AGENTS_PER_KIND, precision, bundleKind: "biped",
       materialFactory: bipedMaterials?.factory,
+      drivenJoints: BIPED_DRIVEN_JOINTS,
     }),
     NMMEngine.load({
       renderer, bundleBaseUrl: "/", characterGlbUrl: "/assets/dog.glb",
@@ -150,7 +162,57 @@ async function boot() {
   let lastPlayerKind: ModelKind | null = null;
 
   const touch = new Touch({ onSwitch: () => cyclePlayer() });
-  const input = new Input(canvas, touch);
+  const gamepad = new GamepadInput();
+  const input = new Input(canvas, touch, gamepad);
+
+  // Tap / click a character to take control of it. Taps are told apart from
+  // drags (LMB facing, orbit, pinch) by travel + duration, the same way
+  // human-atlas separates selection taps from rotation drags.
+  let tapStart: { x: number; y: number; t: number; id: number } | null = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    tapStart = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId };
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    const s = tapStart;
+    tapStart = null;
+    if (!s || s.id !== e.pointerId) return;
+    if (Math.hypot(e.clientX - s.x, e.clientY - s.y) > 6 || e.timeStamp - s.t > 350) return;
+    const hit = pickAgent(e.clientX, e.clientY);
+    if (hit && hit !== playerId) {
+      setPlayer(hit);
+    }
+  });
+  const _ray = new THREE.Raycaster();
+  const _ndc = new THREE.Vector2();
+  /** Ray vs. an upright capsule per agent (cheap stand-in for picking the
+   *  instanced, GPU-skinned mesh). Returns the nearest hit's id. */
+  function pickAgent(clientX: number, clientY: number): string | null {
+    const rect = canvas.getBoundingClientRect();
+    _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    _ray.setFromCamera(_ndc, camera);
+    const { origin, direction } = _ray.ray;
+    let best: string | null = null, bestT = Infinity;
+    for (const r of agents.values()) {
+      const [px, py, pz] = r.agent.getPosition();
+      const height = r.kind === "biped" ? 1.8 : 0.8;
+      const radius = r.kind === "biped" ? 0.35 : 0.45;
+      // Closest approach between the ray and the capsule's vertical axis.
+      const a = new THREE.Vector3(px, py + radius, pz);
+      const axis = new THREE.Vector3(0, Math.max(0, height - 2 * radius), 0);
+      const w0 = origin.clone().sub(a);
+      const b = direction.dot(axis), c = axis.dot(axis);
+      const d = direction.dot(w0), e2 = axis.dot(w0);
+      const denom = c - b * b;
+      let t = denom > 1e-9 ? (b * e2 - c * d) / denom : -d;
+      const sAxis = c > 0 ? THREE.MathUtils.clamp((e2 + b * t) / c, 0, 1) : 0;
+      const onAxis = a.clone().addScaledVector(axis, sAxis);
+      t = Math.max(0, onAxis.clone().sub(origin).dot(direction));
+      const dist = origin.clone().addScaledVector(direction, t).distanceTo(onAxis);
+      if (dist < radius && t < bestT) { bestT = t; best = r.id; }
+    }
+    return best;
+  }
 
   // WASD keycap hint — clicking a key behaves like holding the matching
   // keyboard key (writes into input.keys). The canvas is a sibling, so
@@ -464,6 +526,8 @@ async function boot() {
   }
 
   function drivePlayer() {
+    gamepad.poll();
+    if (gamepad.consume(PAD.Y)) cyclePlayer();
     // Read facing once and mirror it onto the right joystick — so the
     // stick animates along with LMB-drag on the canvas, not just direct
     // touches. fz uses up-positive screen axis; flip back to screen-down
