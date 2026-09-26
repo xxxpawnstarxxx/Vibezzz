@@ -40,6 +40,12 @@ import type { Vec3 } from "./math/vec3.js";
 import { BipedBrain, QuadrupedBrain } from "./runtime/autopilot.js";
 import type { Brain } from "./runtime/autopilot.js";
 
+declare const __APP_VERSION__: string;
+{
+  const el = document.getElementById("app-version");
+  if (el) el.textContent = __APP_VERSION__;
+}
+
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const bootEl = document.getElementById("boot") as HTMLDivElement;
 const setBoot = (m: string) => { if (bootEl) { bootEl.textContent = m; bootEl.style.display = ""; } };
@@ -114,6 +120,9 @@ async function boot() {
       maxAgents: MAX_AGENTS_PER_KIND, precision, bundleKind: "biped",
       materialFactory: bipedMaterials?.factory,
       drivenJoints: BIPED_DRIVEN_JOINTS,
+      // Dual-quaternion skinning keeps volume through elbow / shoulder /
+      // wrist rotations (linear blending collapses them).
+      dqs: character === "human" ? 1 : 0,
     }),
     NMMEngine.load({
       renderer, bundleBaseUrl: "/", characterGlbUrl: "/assets/dog.glb",

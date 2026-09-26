@@ -595,6 +595,15 @@ for (const m of root.listMaterials()) m.dispose();
 genoMesh.setName("Human");
 root.listNodes().find((nd) => nd.getMesh() === genoMesh).setName("Human");
 
+// The human's shoulder (glenohumeral) pivot sits ~7 cm lateral of Geno's
+// LeftArm/RightArm joint, which is buried inside Geno's torso. Record the
+// mesh's real pivot (bind space) so the runtime can rotate the arm mesh about
+// it (src/runtime/arm_pivots.ts) instead of collapsing the deltoid.
+for (const [s, Side] of [["L", "Left"], ["R", "Right"]]) {
+  const node = root.listNodes().find((nd) => nd.getName() === `${Side}Arm`);
+  node.setExtras({ ...node.getExtras(), meshPivot: hp(`DEF-upper_arm.${s}`).toArray().map((v) => +v.toFixed(5)) });
+}
+
 const mkTex = (name, data) => out.createTexture(name).setImage(new Uint8Array(data)).setMimeType("image/webp");
 
 function mkMaterial(name, { color, normal, mr, roughness = 0.6 }) {

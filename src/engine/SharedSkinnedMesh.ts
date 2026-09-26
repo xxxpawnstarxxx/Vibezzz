@@ -27,11 +27,13 @@ import * as THREE from "three";
 import * as TSL from "three/tsl";
 import { StorageBufferAttribute, MeshStandardNodeMaterial } from "three/webgpu";
 import { compileDrivenJoints } from "../runtime/driven_joints.js";
+import { compileArmPivots } from "../runtime/arm_pivots.js";
+import type { ArmPivot } from "../runtime/arm_pivots.js";
 import type { DrivenJoint, DrivenJointSpec } from "../runtime/driven_joints.js";
 
 const {
   Fn, attribute, instanceIndex, normalLocal, storage, tangentLocal, uint,
-  uniform, vec4,
+  uniform, vec4, cross, dot, select, normalize, mix, float,
 } = TSL as unknown as Record<string, (...args: unknown[]) => unknown>;
 
 /** Permissive Node surface — matches how every TSL example written in JS
@@ -39,6 +41,10 @@ const {
 type N = {
   mul(x: unknown): N;
   add(x: unknown): N;
+  sub(x: unknown): N;
+  div(x: unknown): N;
+  length(): N;
+  greaterThanEqual(x: unknown): N;
   element(x: unknown): N;
   transformDirection(x: unknown): N;
   x: N; y: N; z: N; w: N; xyz: N;
@@ -76,6 +82,14 @@ export interface SharedSkinnedRig {
   trackedBones: THREE.Bone[];
   /** Corrective joints evaluated after each agent's pose (may be empty). */
   drivenJoints: DrivenJoint[];
+  /** Per-bone dual quaternions [real, dual] (8 floats) when the rig skins
+   *  with DQS; null for plain linear blend skinning. */
+  boneDQAttr: StorageBufferAttribute | null;
+  boneDQArray: Float32Array | null;
+  /** 0 = linear blend skinning … 1 = dual-quaternion skinning. */
+  dqsBlend: { value: number } | null;
+  /** Mesh shoulder pivots (only for meshes that bake `meshPivot` extras). */
+  armPivots: ArmPivot[];
 }
 
 export interface SharedSkinnedRigOptions {
@@ -83,6 +97,10 @@ export interface SharedSkinnedRigOptions {
   materialFactory?: RigMaterialFactory;
   /** Twist / follow helper joints (see runtime/driven_joints.ts). */
   drivenJoints?: readonly DrivenJointSpec[];
+  /** Dual-quaternion skinning amount (0 = LBS only, default). DQS keeps
+   *  volume through twists and deep bends (elbows, shoulders, wrists), where
+   *  linear blending collapses the mesh. */
+  dqs?: number;
 }
 
 /** Builds the node material for one of the template's source materials.
@@ -211,6 +229,18 @@ export function createSharedSkinnedRig(
   }
   boneMatricesAttr.needsUpdate = true;
 
+  const useDQS = (options.dqs ?? 0) > 0;
+  const boneDQAttr = useDQS ? new StorageBufferAttribute(maxAgents * totalBones * 2, 4) : null;
+  const boneDQArray = boneDQAttr ? (boneDQAttr.array as Float32Array) : null;
+  if (boneDQArray) {
+    for (let i = 0; i < maxAgents * totalBones; i++) boneDQArray[i * 8 + 3] = 1; // identity real part
+    boneDQAttr!.needsUpdate = true;
+  }
+  const dqStorage = boneDQAttr
+    ? storage(boneDQAttr as unknown, "vec4" as unknown, maxAgents * totalBones * 2 as unknown) as unknown as N
+    : null;
+  const dqsBlendU = useDQS ? uniform(options.dqs as unknown) as unknown as N & { value: number } : null;
+
   // -- Custom skinning nodes ---------------------------------------------
   const bindU = uniform(template.bindMatrix as unknown, "mat4" as unknown) as unknown as N;
   const bindInvU = uniform(template.bindMatrixInverse as unknown, "mat4" as unknown) as unknown as N;
@@ -247,7 +277,7 @@ export function createSharedSkinnedRig(
       .add(bY.mul(skinWA.y).mul(bindPos))
       .add(bZ.mul(skinWA.z).mul(bindPos))
       .add(bW.mul(skinWA.w).mul(bindPos));
-    const localPos = bindInvU.mul(skinnedPos).xyz;
+    let localPos = bindInvU.mul(skinnedPos).xyz;
 
     // --- normal + tangent (mutate normalLocal/tangentLocal as side-effects
     //     so three's default normalLocal → normalView → lighting path gets
@@ -258,7 +288,35 @@ export function createSharedSkinnedRig(
       .add(bW.mul(skinWA.w));
     const fullNormalMat = bindInvU.mul(skinMat).mul(bindU);
     const nLocalAttr = attribute("normal" as unknown, "vec3" as unknown) as unknown as N;
-    const skinnedNormal = fullNormalMat.transformDirection(nLocalAttr).xyz;
+    let skinnedNormal = fullNormalMat.transformDirection(nLocalAttr).xyz;
+
+    // --- dual-quaternion skinning (blended with LBS by dqsBlend) ----------
+    let dqRotate: ((v: N) => N) | null = null;
+    if (dqStorage && dqsBlendU) {
+      const base = (instanceIndex as unknown as N).mul(totalBonesU);
+      const fetch = (idx: N) => {
+        const i2 = base.add(idx).mul(2);
+        return { r: dqStorage.element(i2), d: dqStorage.element(i2.add(1)) };
+      };
+      const dx = fetch(skinIdxA.x), dy = fetch(skinIdxA.y), dz = fetch(skinIdxA.z), dw = fetch(skinIdxA.w);
+      // Antipodality: flip each quaternion into the first one's hemisphere.
+      const F = float as unknown as (v: number) => N;
+      const sgn = (q: N) => (select as unknown as (c: N, a: N, b: N) => N)(
+        (dot as unknown as (a: N, b: N) => N)(dx.r, q).greaterThanEqual(0), F(1), F(-1));
+      const wy = skinWA.y.mul(sgn(dy.r)), wz = skinWA.z.mul(sgn(dz.r)), ww = skinWA.w.mul(sgn(dw.r));
+      let real = dx.r.mul(skinWA.x).add(dy.r.mul(wy)).add(dz.r.mul(wz)).add(dw.r.mul(ww));
+      let dual = dx.d.mul(skinWA.x).add(dy.d.mul(wy)).add(dz.d.mul(wz)).add(dw.d.mul(ww));
+      const invLen = F(1).div(real.length());
+      real = real.mul(invLen); dual = dual.mul(invLen);
+      const X = cross as unknown as (a: N, b: N) => N;
+      const rotate = (v: N) => v.add(X(real.xyz, X(real.xyz, v).add(v.mul(real.w))).mul(2));
+      const trans = real.w.mul(dual.xyz).sub(dual.w.mul(real.xyz)).add(X(real.xyz, dual.xyz)).mul(2);
+      const dqPos = bindInvU.mul((vec4 as unknown as (p: N, w: number) => N)(rotate(bindPos.xyz).add(trans), 1)).xyz;
+      const M = mix as unknown as (a: N, b: N, t: N) => N;
+      localPos = M(localPos, dqPos, dqsBlendU);
+      dqRotate = (v: N) => bindInvU.transformDirection(rotate(bindU.transformDirection(v).xyz)).xyz;
+      skinnedNormal = (normalize as unknown as (v: N) => N)(M(skinnedNormal, dqRotate(nLocalAttr), dqsBlendU));
+    }
     (normalLocal as unknown as { assign(x: unknown): void }).assign(skinnedNormal);
 
     // Tangent skinning — only meaningful if the geometry has a tangent
@@ -266,7 +324,10 @@ export function createSharedSkinnedRig(
     // assignment is harmless dead code in the emitted shader.
     if (template.geometry.getAttribute("tangent") !== undefined) {
       const tLocalAttr = attribute("tangent" as unknown, "vec3" as unknown) as unknown as N;
-      const skinnedTangent = fullNormalMat.transformDirection(tLocalAttr).xyz;
+      let skinnedTangent = fullNormalMat.transformDirection(tLocalAttr).xyz;
+      if (dqRotate && dqsBlendU) {
+        skinnedTangent = (normalize as unknown as (v: N) => N)((mix as unknown as (a: N, b: N, t: N) => N)(skinnedTangent, dqRotate(tLocalAttr), dqsBlendU));
+      }
       (tangentLocal as unknown as { assign(x: unknown): void }).assign(skinnedTangent);
     }
 
@@ -338,6 +399,16 @@ export function createSharedSkinnedRig(
     templateRoot,
     trackedBones,
     drivenJoints: compileDrivenJoints(options.drivenJoints ?? [], boneNameToIndex, boneInverses),
+    boneDQAttr,
+    boneDQArray,
+    dqsBlend: dqsBlendU,
+    armPivots: compileArmPivots(
+      new Map(skeleton.bones
+        .filter((b) => Array.isArray(b.userData.meshPivot))
+        .map((b) => [b.name, new THREE.Vector3().fromArray(b.userData.meshPivot as number[])])),
+      boneNameToIndex, boneInverses,
+      skeleton.bones.map((b) => skeleton.bones.indexOf(b.parent as THREE.Bone)),
+    ),
   };
 }
 

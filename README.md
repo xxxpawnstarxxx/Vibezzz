@@ -70,7 +70,12 @@ The sword is simulated, not animated (`src/runtime/half_sword.ts`):
 
 - The grip chases the hand target through a damped spring, so the weapon lags and carries momentum.
 - The tip is a Verlet particle held at blade length, pulled by gravity and a wrist spring toward the guard. Fast hand movement whips the blade through a cut.
-- Each arm is placed with two-bone IK that respects the elbow's real hinge axis (taken from the bind pose), with the elbow pointing down and slightly out. The upper arm can't twist and the elbow can't fold sideways. About a third of any lift goes to the clavicle.
+- **Arms without contortion** (fixed in v6, from four separate causes):
+  - The arm now rotates about the mesh's real shoulder joint. The network's upper-arm joint sits about 7 cm inside Geno's torso, so the converter records the realistic body's actual pivot (`meshPivot`), and `src/runtime/arm_pivots.ts` rotates every arm about it each frame.
+  - The two-bone IK searches elbow swivel × grip roll for the least forearm twist and wrist bend. It keeps the elbow below the shoulder, outside the torso, and stable from frame to frame, and the elbow only flexes about its real hinge.
+  - The forearm twist helper is re-derived after the IK moves the arm; before, it kept a stale pose, which was the "tentacle" forearm.
+  - The shoulder blade lifts and moves forward with high and cross-body reaches.
+- **Skinning** is dual-quaternion for the realistic human (linear blend skinning for Geno), which keeps volume through elbow, shoulder and wrist rotation.
 - The gripping hand rotates to follow the blade, and the fingers curl into a fist around the handle.
 - An idle sword hand sags back to a low guard.
 
@@ -131,10 +136,15 @@ You need a browser with WebGPU. Add `?character=geno` to the URL to switch back 
 
 The **Look** panel adjusts exposure, environment light, and the skin settings: pores, detail normal, oiliness, roughness and subsurface.
 
+## Version badge
+
+The number in the top middle of the page (for example `v6`) is `buildNumber` in `package.json`. Vite injects it at build time, so bump it with each release.
+
 ## Tools
 
 - `tools/build-human.mjs` builds the human asset (see above).
 - `tools/preview/preview.html` is served by the dev server. It shows the converted rig next to Geno with test poses: `?pose=1`, `?cross=1.4`, `?shrug=-0.4`, `?twist=1.6&driven=1`, and `?solo=1`.
+- `tools/preview/arms.html` and `tools/preview/arms_gpu.html` are an arm-pose test bench. They run the real Half Sword arm code on a grid of 15 hand targets and grips. `arms_gpu.html` renders through the game's own skinning shader: `?dqs=0|1`, `?view=front|side|frontR|frontL`, `?cases=…`, `?zoom=…`, `?debug=1` (prints wrist twist).
 - `tools/preview/shot.mjs` and `tools/preview/walk.mjs` take headless screenshots. `walk.mjs` drives the real app over WebGPU on SwiftShader.
 
 ## Attribution & license

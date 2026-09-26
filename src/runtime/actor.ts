@@ -5,6 +5,8 @@
 import * as THREE from "three";
 import { evaluateDrivenJoints } from "./driven_joints.js";
 import type { DrivenJoint } from "./driven_joints.js";
+import { applyArmPivots } from "./arm_pivots.js";
+import type { ArmPivot } from "./arm_pivots.js";
 import * as M from "../math/mat4.js";
 import * as Q from "../math/quat.js";
 import * as V from "../math/vec3.js";
@@ -13,6 +15,21 @@ import type { Vec3 } from "../math/vec3.js";
 
 // Module-level scratch — one Matrix4 reused across every call to
 // writeBoneMatrices (zero allocation on the hot path).
+const _dqQ = new THREE.Quaternion();
+/** Rigid matrix → unit dual quaternion [qx,qy,qz,qw, dx,dy,dz,dw]. */
+export function writeDualQuat(m: THREE.Matrix4, out: Float32Array, o: number): void {
+  _dqQ.setFromRotationMatrix(m);
+  const e = m.elements;
+  const tx = e[12], ty = e[13], tz = e[14];
+  const { x, y, z, w } = _dqQ;
+  out[o] = x; out[o + 1] = y; out[o + 2] = z; out[o + 3] = w;
+  // dual = ½ · (t, 0) ⊗ q
+  out[o + 4] = 0.5 * (tx * w + ty * z - tz * y);
+  out[o + 5] = 0.5 * (-tx * z + ty * w + tz * x);
+  out[o + 6] = 0.5 * (tx * y - ty * x + tz * w);
+  out[o + 7] = -0.5 * (tx * x + ty * y + tz * z);
+}
+
 const _tmpOffset = new THREE.Matrix4();
 
 export class Actor {
@@ -168,6 +185,9 @@ export class Actor {
    *  Sword arm IK + grip for the player). */
   poseOverride: ((world: THREE.Matrix4[]) => void) | null = null;
 
+  /** Mesh shoulder pivots — shared template data (see arm_pivots.ts). */
+  private armPivots: readonly ArmPivot[] = [];
+
   /** Corrective twist / follow joints — shared template data. */
   private drivenJoints: readonly DrivenJoint[] = [];
 
@@ -189,7 +209,7 @@ export class Actor {
    *  No matrixWorld writes on the THREE.Bone objects, no scene traversal,
    *  no `skeleton.update`. The result lands directly in the StorageBuffer
    *  the custom instanced-skinning shader reads. */
-  writeBoneMatrices(sharedArray: Float32Array, slotBase: number): void {
+  writeBoneMatrices(sharedArray: Float32Array, slotBase: number, dqArray?: Float32Array | null, dqBase = 0): void {
     const world = this.scratchWorld;
     const trackedIdx = this.trackedSkelIdx;
     const cascade = this.untrackedCascade;
@@ -217,6 +237,9 @@ export class Actor {
     // Phase 2a: gameplay pose override (player arms / grip).
     if (this.poseOverride) this.poseOverride(world);
 
+    // Phase 2a': rotate arm meshes about their real shoulder pivot.
+    if (this.armPivots.length > 0) applyArmPivots(world, this.armPivots, boneInverses);
+
     // Phase 2b: driven (corrective) joints — rotate helper joints from the
     // pose just computed (RigLogic-style twist / follow behaviours).
     if (this.drivenJoints.length > 0) evaluateDrivenJoints(world, this.drivenJoints);
@@ -226,6 +249,7 @@ export class Actor {
     for (let k = 0; k < world.length; k++) {
       offset.multiplyMatrices(world[k], boneInverses[k]);
       offset.toArray(sharedArray, slotBase + k * 16);
+      if (dqArray) writeDualQuat(offset, dqArray, dqBase + k * 8);
     }
   }
 
@@ -244,6 +268,7 @@ export class Actor {
     bindLocalMatrices: readonly THREE.Matrix4[];
     boneInverses: readonly THREE.Matrix4[];
     drivenJoints?: readonly DrivenJoint[];
+    armPivots?: readonly ArmPivot[];
   }): void {
     this.trackedSkelIdx = new Int32Array(this.threeBones.length);
     for (let i = 0; i < this.threeBones.length; i++) {
@@ -258,6 +283,7 @@ export class Actor {
     this.bindLocalMatrices = rig.bindLocalMatrices;
     this.boneInverses = rig.boneInverses;
     this.drivenJoints = rig.drivenJoints ?? [];
+    this.armPivots = rig.armPivots ?? [];
     this.scratchWorld = Array.from({ length: rig.totalBones }, () => new THREE.Matrix4());
   }
 

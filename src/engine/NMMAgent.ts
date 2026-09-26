@@ -365,7 +365,8 @@ export class NMMAgent {
 
   writeBoneMatricesToRig(sharedArray: Float32Array): void {
     if (this.slot < 0) return;
-    this.actor.writeBoneMatrices(sharedArray, this.slot * this.rig.agentStride);
+    this.actor.writeBoneMatrices(sharedArray, this.slot * this.rig.agentStride,
+      this.rig.boneDQArray, this.slot * this.rig.totalBones * 8);
   }
 
   get debugState() {

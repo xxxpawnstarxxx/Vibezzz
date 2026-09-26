@@ -127,7 +127,7 @@ export class HitReactor {
       while (stack.length) { const i = stack.pop()!; out.push(i); stack.push(...children[i]); }
       return out;
     };
-    this.pivots = ([["Spine1", 0.35], ["Spine3", 0.3], ["Neck", 0.35]] as [string, number][])
+    this.pivots = ([["Spine1", 0.45], ["Spine3", 0.4], ["Neck", 0.15]] as [string, number][])
       .map(([n, share]) => {
         const idx = boneNameToIndex.get(n)!;
         return { idx, share, subtree: subtree(idx) };
@@ -152,7 +152,7 @@ export class HitReactor {
       this.angVel.addScaledVector(this.rotVec, -k * h).addScaledVector(this.angVel, -c * h);
       this.rotVec.addScaledVector(this.angVel, h);
     }
-    const max = 0.7;
+    const max = 0.45;
     if (this.rotVec.length() > max) this.rotVec.setLength(max);
   }
 

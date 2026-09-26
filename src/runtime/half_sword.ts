@@ -19,6 +19,7 @@
  */
 
 import * as THREE from "three";
+import type { ArmPivot } from "./arm_pivots.js";
 
 export type HandSide = "Left" | "Right";
 
@@ -55,11 +56,20 @@ interface ArmRig {
   clavicle: number;
   arm: number; fore: number; hand: number;
   upperLen: number; foreLen: number;
+  /** Shoulder pivot the arm mesh rotates about, in the clavicle's bind-local
+   *  frame, and the arm joint's bind offset from it (world axes). */
+  pivotInClavicle: THREE.Vector3;
+  jointFromPivot: THREE.Vector3;
+  armBindRot: THREE.Quaternion;
   /** Bone directions (toward the child) and the elbow flexion hinge, each in
    *  the bone's own local frame — lets the IK place the elbow so it only
    *  ever bends about its anatomical hinge. */
   upperDirL: THREE.Vector3; upperHingeL: THREE.Vector3;
   foreDirL: THREE.Vector3; foreHingeL: THREE.Vector3;
+  /** Bind rotation of the hand relative to the forearm (neutral wrist), and
+   *  the forearm axis expressed in the neutral hand's frame (twist axis). */
+  handRelBind: THREE.Quaternion;
+  wristTwistAxisL: THREE.Vector3;
   /** Hand-local axes: across the knuckles (index → pinky), wrist → knuckles,
    *  and the palm normal. */
   across: THREE.Vector3; forward: THREE.Vector3; palm: THREE.Vector3;
@@ -68,6 +78,9 @@ interface ArmRig {
   /** Finger joints in cascade order, each with its local curl rotation axis
    *  and the curl angle at full grip. */
   fingers: { idx: number; parent: number; axis: THREE.Vector3; angle: number }[];
+  /** Other untracked joints under the arm (e.g. the forearm twist helper),
+   *  re-cascaded after the IK moves the arm so they don't keep a stale pose. */
+  helpers: { idx: number; parent: number }[];
 }
 
 export interface RigInfo {
@@ -75,6 +88,9 @@ export interface RigInfo {
   boneInverses: readonly THREE.Matrix4[];
   bindLocalMatrices: readonly THREE.Matrix4[];
   untrackedCascade: readonly { skelIdx: number; parentSkelIdx: number }[];
+  /** Mesh shoulder pivots (arm_pivots.ts); arms without one pivot on the
+   *  skeleton's own joint. */
+  armPivots?: readonly ArmPivot[];
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -149,12 +165,24 @@ function buildArm(rig: RigInfo, side: HandSide): ArmRig {
     fingers.push({ idx: skelIdx, parent: parentSkelIdx, axis, angle });
   }
 
+  // Everything under the arm that the IK doesn't set directly.
+  const armTree = new Set<number>([arm, fore, hand]);
+  const helpers: { idx: number; parent: number }[] = [];
+  const fingerSet = new Set(fingers.map((f) => f.idx));
+  for (const { skelIdx, parentSkelIdx } of rig.untrackedCascade) {
+    if (!armTree.has(parentSkelIdx)) continue;
+    armTree.add(skelIdx);
+    if (skelIdx === fore || skelIdx === hand || fingerSet.has(skelIdx)) continue;
+    helpers.push({ idx: skelIdx, parent: parentSkelIdx });
+  }
+
   const toLocal = (v: THREE.Vector3) => v.clone().applyQuaternion(handRotInv).normalize();
   const acrossL = toLocal(across), forwardL = toLocal(forward), palmL = toLocal(palm);
 
   // Elbow hinge: flexion brings the forearm forward from the (A-pose) bind,
   // so the flexion axis is upperArmDir × forward.
-  const d1 = bp(fore).sub(bp(arm)).normalize();
+  const pivotW = (rig.armPivots?.find((a) => a.arm === arm)?.pivot ?? bp(arm)).clone();
+  const d1 = bp(fore).sub(pivotW).normalize();
   const d2 = bp(hand).sub(bp(fore)).normalize();
   const hingeW = new THREE.Vector3().crossVectors(d1, new THREE.Vector3(0, 0, 1)).normalize();
   const armRotInv = rotOf(bindWorld(rig, arm)).invert();
@@ -165,11 +193,17 @@ function buildArm(rig: RigInfo, side: HandSide): ArmRig {
     upperHingeL: hingeW.clone().applyQuaternion(armRotInv).normalize(),
     foreDirL: d2.clone().applyQuaternion(foreRotInv).normalize(),
     foreHingeL: hingeW.clone().applyQuaternion(foreRotInv).normalize(),
-    upperLen: bp(fore).distanceTo(bp(arm)),
+    handRelBind: foreRotInv.clone().multiply(rotOf(bindWorld(rig, hand))),
+    wristTwistAxisL: d2.clone().applyQuaternion(rotOf(bindWorld(rig, hand)).invert()).normalize(),
+    upperLen: bp(fore).distanceTo(pivotW),
+    pivotInClavicle: pivotW.clone().applyMatrix4(rig.boneInverses[clavicle]),
+    jointFromPivot: bp(arm).sub(pivotW),
+    armBindRot: rotOf(bindWorld(rig, arm)),
     foreLen: bp(hand).distanceTo(bp(fore)),
     across: acrossL, forward: forwardL, palm: palmL,
     gripOffset: forwardL.clone().multiplyScalar(handLen * 0.8).addScaledVector(palmL, 0.028),
     fingers,
+    helpers,
   };
 }
 
@@ -182,6 +216,10 @@ interface HandState {
   curl: number;
   /** Hand rotation blend toward the grip orientation. */
   rotW: number;
+  /** Last chosen elbow swivel / grip roll (radians) — keeps solutions
+   *  continuous frame to frame. */
+  swivel: number;
+  roll: number;
 }
 
 const REST_MAIN = new THREE.Vector3(0.2, -0.42, 0.28);
@@ -230,7 +268,7 @@ export class HalfSword {
 
   constructor(private readonly rig: RigInfo) {
     this.arms = { Left: buildArm(rig, "Left"), Right: buildArm(rig, "Right") };
-    const mk = (): HandState => ({ offset: new THREE.Vector3(), w: 0, curl: 0, rotW: 0 });
+    const mk = (): HandState => ({ offset: new THREE.Vector3(), w: 0, curl: 0, rotW: 0, swivel: 0, roll: 0 });
     this.hands = { Left: mk(), Right: mk() };
     this.hands.Right.offset.copy(REST_MAIN);
     this.hands.Left.offset.set(-REST_MAIN.x, REST_MAIN.y, REST_MAIN.z);
@@ -427,7 +465,7 @@ export class HalfSword {
     if (this.fwd.lengthSq() < 1e-6) this.fwd.set(0, 0, 1);
     this.fwd.normalize();
     this.right.crossVectors(this.fwd, UP).normalize();
-    for (const side of ["Left", "Right"] as HandSide[]) posOf(world[this.arms[side].arm], this.shoulder[side]);
+    for (const side of ["Left", "Right"] as HandSide[]) this.pivotOf(world, this.arms[side], this.shoulder[side]);
     this.haveBody = true;
     if (!this.enabled || !this.simReady) { this.swordVisible = false; return; }
 
@@ -459,6 +497,11 @@ export class HalfSword {
     this.swordVisible = true;
   };
 
+  /** Where the arm mesh's shoulder pivot currently is. */
+  private pivotOf(world: readonly THREE.Matrix4[], arm: ArmRig, out = new THREE.Vector3()): THREE.Vector3 {
+    return out.copy(arm.pivotInClavicle).applyMatrix4(world[arm.clavicle]);
+  }
+
   /** Hand world rotation that closes the fist around the blade axis, with the
    *  wrist kept roughly in line with the forearm. */
   private gripRotation(arm: ArmRig, gripPoint: THREE.Vector3): THREE.Quaternion {
@@ -469,51 +512,109 @@ export class HalfSword {
 
   /** Two-bone IK (upper arm + forearm) blended with the network's arm, then
    *  the hand placed so its grip point lands on `gripPoint`. */
-  private solveArm(world: THREE.Matrix4[], arm: ArmRig, hs: HandState, gripPoint: THREE.Vector3, handRot: THREE.Quaternion): void {
-    // Hand bone target from the desired grip.
-    const target = gripPoint.clone().sub(arm.gripOffset.clone().applyQuaternion(handRot));
+  private solveArm(world: THREE.Matrix4[], arm: ArmRig, hs: HandState, gripPoint: THREE.Vector3, handRot0: THREE.Quaternion): void {
+    const sideSign = arm.side === "Right" ? 1 : -1;
+    const lateral = this.right.clone().multiplyScalar(sideSign);
+    const one = new THREE.Vector3(1, 1, 1);
 
-    // Shoulder girdle: lifting the arm also lifts / swings the clavicle
-    // (roughly a third of the elevation, like the scapulohumeral rhythm), so
-    // overhead and cross-body guards don't crush the deltoid into the chest.
+    // --- shoulder girdle -------------------------------------------------
+    // Elevate the clavicle when the hands go above the shoulders and protract
+    // it when they reach forward / across, like a real shoulder blade. Keeps
+    // the deltoid from being crushed by the upper arm alone.
     {
+      const P0 = this.pivotOf(world, arm);
+      const rel = gripPoint.clone().sub(P0);
+      const elev = THREE.MathUtils.clamp((rel.y + 0.05) / 0.45, 0, 1) * 0.32;
+      const prot = THREE.MathUtils.clamp(rel.dot(this.fwd) / 0.5, 0, 1) * 0.16
+        + THREE.MathUtils.clamp(-rel.dot(lateral) / 0.35, 0, 1) * 0.14;
+      const qe = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3().crossVectors(lateral, UP).normalize(), elev * hs.w);
+      const qp = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3().crossVectors(lateral, this.fwd).normalize(), prot * hs.w);
+      const qs = qp.multiply(qe);
       const ps = posOf(world[arm.clavicle]);
-      const pa0 = posOf(world[arm.arm]), pf0 = posOf(world[arm.fore]);
-      const want = target.clone().sub(pa0).normalize();
-      const cur = pf0.sub(pa0).normalize();
-      const qs = new THREE.Quaternion().slerp(new THREE.Quaternion().setFromUnitVectors(cur, want), 0.3 * hs.w);
-      const one = new THREE.Vector3(1, 1, 1);
       for (const i of [arm.clavicle, arm.arm, arm.fore, arm.hand]) {
         const p = posOf(world[i]).sub(ps).applyQuaternion(qs).add(ps);
         world[i].compose(p, rotOf(world[i]).premultiply(qs), one);
       }
     }
 
-    const pa = posOf(world[arm.arm]);
+    // Solve from the mesh's shoulder pivot (see arm_pivots.ts).
+    const pa = this.pivotOf(world, arm);
     const Ra = rotOf(world[arm.arm]), Rf = rotOf(world[arm.fore]), Rh = rotOf(world[arm.hand]);
     const L1 = arm.upperLen, L2 = arm.foreLen;
-    const toT = target.clone().sub(pa);
-    const d = THREE.MathUtils.clamp(toT.length(), Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
-    const dir = toT.normalize();
-    // Elbow hint: down, a little out to the side and back — a relaxed
-    // fencer's elbow. Projected off the shoulder→hand line.
-    const sideSign = arm.side === "Right" ? 1 : -1;
-    const pole = new THREE.Vector3().addScaledVector(UP, -1)
-      .addScaledVector(this.right, 0.3 * sideSign).addScaledVector(this.fwd, -0.15);
-    pole.addScaledVector(dir, -pole.dot(dir));
-    if (pole.lengthSq() < 1e-6) pole.copy(this.fwd).addScaledVector(dir, -this.fwd.dot(dir));
-    pole.normalize();
-    const cosA = THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1);
-    const elbow = pa.clone().addScaledVector(dir, L1 * cosA).addScaledVector(pole, L1 * Math.sqrt(1 - cosA * cosA));
-    const hand = pa.clone().addScaledVector(dir, d);
+    const gripping = hs.rotW > 0.5;
+    const bladeAxis = this.blade;
+
+    // --- search elbow swivel × grip roll ------------------------------------
+    // Elbow swivel (rotation of the bend plane about shoulder→hand) and, when
+    // gripping, the fist's roll about the handle are both free. Pick the pair
+    // needing the least forearm twist and wrist bend, with the elbow kept
+    // below the shoulder, outside the torso, and near last frame's choice.
+    const basePole = new THREE.Vector3().addScaledVector(UP, -1)
+      .addScaledVector(lateral, 0.45).addScaledVector(this.fwd, 0.35);
+    const chest = this.chest;
+    let best: { cost: number; swivel: number; roll: number; elbow: THREE.Vector3; hand: THREE.Vector3;
+      hinge: THREE.Vector3; handRot: THREE.Quaternion } | null = null;
+    const qRoll = new THREE.Quaternion(), qSw = new THREE.Quaternion();
+    const tmpQ = new THREE.Quaternion();
+    const evaluate = (swivel: number, roll: number) => {
+      const handRot = gripping ? qRoll.setFromAxisAngle(bladeAxis, roll).clone().multiply(handRot0) : handRot0.clone();
+      const target = gripPoint.clone().sub(arm.gripOffset.clone().applyQuaternion(handRot));
+      const toT = target.clone().sub(pa);
+      const rawD = toT.length();
+      const d = THREE.MathUtils.clamp(rawD, Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+      const dir = toT.normalize();
+      const pole = basePole.clone().addScaledVector(dir, -basePole.dot(dir));
+      if (pole.lengthSq() < 1e-6) pole.copy(this.fwd).addScaledVector(dir, -this.fwd.dot(dir));
+      pole.normalize().applyQuaternion(qSw.setFromAxisAngle(dir, swivel));
+      const cosA = THREE.MathUtils.clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1);
+      const elbow = pa.clone().addScaledVector(dir, L1 * cosA).addScaledVector(pole, L1 * Math.sqrt(1 - cosA * cosA));
+      const hand = pa.clone().addScaledVector(dir, d);
+      const hinge = new THREE.Vector3().crossVectors(pole, dir).normalize();
+
+      let cost = 0;
+      if (gripping) {
+        // Wrist: desired hand vs the hand a neutral wrist would give.
+        const RfIK = frameRotation(arm.foreDirL, arm.foreHingeL, hand.clone().sub(elbow), hinge);
+        const neutral = RfIK.multiply(arm.handRelBind);
+        const rel = tmpQ.copy(neutral).invert().multiply(handRot);
+        if (rel.w < 0) rel.set(-rel.x, -rel.y, -rel.z, -rel.w);
+        const a = arm.wristTwistAxisL;
+        const tw = 2 * Math.atan2(rel.x * a.x + rel.y * a.y + rel.z * a.z, rel.w);
+        const total = 2 * Math.acos(Math.min(1, rel.w));
+        const swing = Math.max(0, total - Math.abs(tw));
+        // Forearm pronation/supination is comfortable to ~±70°; wrist
+        // flexion/deviation to ~±35°.
+        cost += 1.0 * tw * tw + 3.0 * Math.max(0, Math.abs(tw) - 1.2) ** 2;
+        cost += 0.6 * swing * swing + 4.0 * Math.max(0, swing - 0.6) ** 2;
+        cost += 0.15 * roll * roll + 0.8 * (roll - hs.roll) ** 2;
+      }
+      cost += 0.35 * swivel * swivel + 1.2 * (swivel - hs.swivel) ** 2;
+      // Elbow above the shoulder or tucked into the torso is contorted.
+      cost += 30 * Math.max(0, elbow.y - (pa.y - 0.02)) ** 2 / 0.01;
+      const out = elbow.clone().sub(chest).dot(lateral);
+      cost += 30 * Math.max(0, 0.13 - out) ** 2 / 0.01;
+      const behind = -elbow.clone().sub(chest).dot(this.fwd);
+      cost += 20 * Math.max(0, behind - 0.05) ** 2 / 0.01;
+      cost += 10 * Math.max(0, rawD - (L1 + L2)) ** 2 / 0.01;
+      const dbg = (globalThis as unknown as { __armDebug?: (o: unknown) => void }).__armDebug;
+      if (dbg) dbg({ side: arm.side, swivel: +swivel.toFixed(2), roll: +roll.toFixed(2), cost: +cost.toFixed(3),
+        elbow: elbow.toArray().map((v) => +v.toFixed(3)), rawD: +rawD.toFixed(3), L: +(L1 + L2).toFixed(3) });
+      if (!best || cost < best.cost) best = { cost, swivel, roll, elbow, hand, hinge, handRot };
+    };
+    const rolls = gripping ? [-0.9, -0.6, -0.3, 0, 0.3, 0.6, 0.9] : [0];
+    for (let i = -8; i <= 8; i++) for (const r of rolls) evaluate(i * 0.2, r);
+    // Refine around the best.
+    const b0 = best!;
+    for (const ds of [-0.1, -0.05, 0.05, 0.1]) for (const dr of gripping ? [-0.15, 0, 0.15] : [0]) evaluate(b0.swivel + ds, b0.roll + dr);
+    const sol = best!;
+    hs.swivel = sol.swivel;
+    hs.roll = sol.roll;
 
     // Absolute bone rotations: bone axis onto the solved segment, elbow
-    // hinge onto the bend plane's normal (pole × dir — stable even when the
-    // arm is straight). No roll is left to chance, so the elbow can't fold
-    // sideways and the upper arm doesn't corkscrew.
-    const hinge = new THREE.Vector3().crossVectors(pole, dir).normalize();
-    const RaIK = frameRotation(arm.upperDirL, arm.upperHingeL, elbow.clone().sub(pa), hinge);
-    const RfIK = frameRotation(arm.foreDirL, arm.foreHingeL, hand.clone().sub(elbow), hinge);
+    // hinge onto the bend plane's normal, so the elbow only ever flexes
+    // about its anatomical axis.
+    const RaIK = frameRotation(arm.upperDirL, arm.upperHingeL, sol.elbow.clone().sub(pa), sol.hinge);
+    const RfIK = frameRotation(arm.foreDirL, arm.foreHingeL, sol.hand.clone().sub(sol.elbow), sol.hinge);
 
     const newRa = Ra.clone().slerp(RaIK, hs.w);
     const newRf = Rf.clone().slerp(RfIK, hs.w);
@@ -521,11 +622,16 @@ export class HalfSword {
     const newPh = arm.foreDirL.clone().applyQuaternion(newRf).multiplyScalar(L2).add(newPf);
     // The hand is carried by the forearm's change, then turned to the grip.
     const carried = newRf.clone().multiply(Rf.clone().invert()).multiply(Rh);
-    const newRh = carried.slerp(handRot, hs.rotW);
-    const one = new THREE.Vector3(1, 1, 1);
-    world[arm.arm].compose(pa, newRa, one);
+    const newRh = carried.slerp(sol.handRot, hs.rotW);
+    // Arm joint rides the rotation about the pivot.
+    const Rrel = newRa.clone().multiply(arm.armBindRot.clone().invert());
+    const jointPos = arm.jointFromPivot.clone().applyQuaternion(Rrel).add(pa);
+    world[arm.arm].compose(jointPos, newRa, one);
     world[arm.fore].compose(newPf, newRf, one);
     world[arm.hand].compose(newPh, newRh, one);
+    for (const h of arm.helpers) {
+      world[h.idx].multiplyMatrices(world[h.parent], this.rig.bindLocalMatrices[h.idx]);
+    }
     this.curlFingers(world, arm, hs.curl);
   }
 

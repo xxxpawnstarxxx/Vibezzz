@@ -53,6 +53,8 @@ export interface NMMEngineOptions {
   /** Optional corrective joints (twist / follow) evaluated per agent after
    *  the network's pose — see `runtime/driven_joints.ts`. */
   drivenJoints?: readonly DrivenJointSpec[];
+  /** Dual-quaternion skinning amount (0 = LBS). */
+  dqs?: number;
   /** Maximum simultaneous characters. Storage buffers are sized for this. */
   maxAgents: number;
   /** Which bundle to load. Default `biped`. */
@@ -97,7 +99,7 @@ export class NMMEngine {
       .parent_names;
     const rig = createSharedSkinnedRig(
       templateMesh, opts.maxAgents, bundle.meta.skeleton.bone_names, parentNames,
-      { materialFactory: opts.materialFactory, drivenJoints: opts.drivenJoints },
+      { materialFactory: opts.materialFactory, drivenJoints: opts.drivenJoints, dqs: opts.dqs },
     );
 
     const inference = await Inference.create(bundle, opts.renderer, {
@@ -174,6 +176,7 @@ export class NMMEngine {
     }
     // Mark the shared bone buffer as dirty so the WebGPU backend re-uploads.
     this.rig.boneMatricesAttr.needsUpdate = true;
+    if (this.rig.boneDQAttr) this.rig.boneDQAttr.needsUpdate = true;
   }
 
   private async runBatchedInference(): Promise<void> {
