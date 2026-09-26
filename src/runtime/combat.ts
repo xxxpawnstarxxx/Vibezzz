@@ -20,6 +20,14 @@ import type { NMMAgent } from "../engine/NMMAgent.js";
 const UP = new THREE.Vector3(0, 1, 0);
 
 export type Zone = "head" | "neck" | "torso" | "arm" | "leg";
+/** Per-region health (Half Sword SG_Autosave: Head / Neck / Body / Arm L/R /
+ *  Leg L/R Health). A region at 0 is wrecked: an arm drops its weapon and
+ *  can't grip, a leg limps, head / neck put the fighter down. */
+export type Region = "head" | "neck" | "body" | "armL" | "armR" | "legL" | "legR";
+export const REGIONS: Region[] = ["head", "neck", "body", "armL", "armR", "legL", "legR"];
+export function freshLimbs(): Record<Region, number> {
+  return { head: 100, neck: 100, body: 100, armL: 100, armR: 100, legL: 100, legR: 100 };
+}
 const ZONE_DAMAGE: Record<Zone, number> = { head: 1.8, neck: 1.6, torso: 1.0, arm: 0.55, leg: 0.7 };
 
 // ---------------------------------------------------------------------------
@@ -58,24 +66,24 @@ const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vect
 // Body capsules
 // ---------------------------------------------------------------------------
 
-export interface Capsule { a: THREE.Vector3; b: THREE.Vector3; r: number; zone: Zone }
+export interface Capsule { a: THREE.Vector3; b: THREE.Vector3; r: number; zone: Zone; region: Region; bone: number }
 
-const CAPSULE_DEFS: [string, string, number, Zone][] = [
-  ["Hips", "Spine2", 0.14, "torso"],
-  ["Spine2", "Neck", 0.14, "torso"],
-  ["Neck", "Head", 0.06, "neck"],
-  ["LeftArm", "LeftForeArm", 0.055, "arm"],
-  ["LeftForeArm", "LeftHand", 0.045, "arm"],
-  ["RightArm", "RightForeArm", 0.055, "arm"],
-  ["RightForeArm", "RightHand", 0.045, "arm"],
-  ["LeftUpLeg", "LeftLeg", 0.08, "leg"],
-  ["LeftLeg", "LeftFoot", 0.06, "leg"],
-  ["RightUpLeg", "RightLeg", 0.08, "leg"],
-  ["RightLeg", "RightFoot", 0.06, "leg"],
+const CAPSULE_DEFS: [string, string, number, Zone, Region][] = [
+  ["Hips", "Spine2", 0.14, "torso", "body"],
+  ["Spine2", "Neck", 0.14, "torso", "body"],
+  ["Neck", "Head", 0.06, "neck", "neck"],
+  ["LeftArm", "LeftForeArm", 0.055, "arm", "armL"],
+  ["LeftForeArm", "LeftHand", 0.045, "arm", "armL"],
+  ["RightArm", "RightForeArm", 0.055, "arm", "armR"],
+  ["RightForeArm", "RightHand", 0.045, "arm", "armR"],
+  ["LeftUpLeg", "LeftLeg", 0.08, "leg", "legL"],
+  ["LeftLeg", "LeftFoot", 0.06, "leg", "legL"],
+  ["RightUpLeg", "RightLeg", 0.08, "leg", "legR"],
+  ["RightLeg", "RightFoot", 0.06, "leg", "legR"],
 ];
 
 export class BodyColliders {
-  private readonly defs: { a: number; b: number; r: number; zone: Zone }[];
+  private readonly defs: { a: number; b: number; r: number; zone: Zone; region: Region }[];
   private readonly neck: number;
   private readonly head: number;
 
@@ -85,7 +93,7 @@ export class BodyColliders {
       if (i === undefined) throw new Error(`combat: bone ${n} missing`);
       return i;
     };
-    this.defs = CAPSULE_DEFS.map(([a, b, r, zone]) => ({ a: idx(a), b: idx(b), r, zone }));
+    this.defs = CAPSULE_DEFS.map(([a, b, r, zone, region]) => ({ a: idx(a), b: idx(b), r, zone, region }));
     this.neck = idx("Neck");
     this.head = idx("Head");
   }
@@ -95,13 +103,13 @@ export class BodyColliders {
     const caps: Capsule[] = this.defs.map((d) => ({
       a: new THREE.Vector3().setFromMatrixPosition(world[d.a]),
       b: new THREE.Vector3().setFromMatrixPosition(world[d.b]),
-      r: d.r, zone: d.zone,
+      r: d.r, zone: d.zone, region: d.region, bone: d.a,
     }));
     // Skull: from the head joint up along the neck → head direction.
     const n = new THREE.Vector3().setFromMatrixPosition(world[this.neck]);
     const h = new THREE.Vector3().setFromMatrixPosition(world[this.head]);
     const up = h.clone().sub(n).normalize();
-    caps.push({ a: h.clone().addScaledVector(up, 0.04), b: h.clone().addScaledVector(up, 0.13), r: 0.095, zone: "head" });
+    caps.push({ a: h.clone().addScaledVector(up, 0.04), b: h.clone().addScaledVector(up, 0.13), r: 0.095, zone: "head", region: "head", bone: this.head });
     return caps;
   }
 }
@@ -115,6 +123,10 @@ export class BodyColliders {
  *  subtrees (arms and the sword grip ride along before arm IK runs). */
 export class HitReactor {
   private readonly rotVec = new THREE.Vector3();   // axis * angle
+  /** Static lean added on top of the spring (axis * angle), e.g. stooping
+   *  to pick something up. Eased toward `leanTarget`. */
+  readonly lean = new THREE.Vector3();
+  readonly leanTarget = new THREE.Vector3();
   private readonly angVel = new THREE.Vector3();
   private readonly pivots: { idx: number; share: number; subtree: number[] }[];
 
@@ -154,14 +166,16 @@ export class HitReactor {
     }
     const max = 0.45;
     if (this.rotVec.length() > max) this.rotVec.setLength(max);
+    this.lean.lerp(this.leanTarget, 1 - Math.exp(-dt * 6));
   }
 
   get active(): boolean { return this.rotVec.lengthSq() > 1e-7 || this.angVel.lengthSq() > 1e-6; }
 
   apply(world: THREE.Matrix4[]): void {
-    const angle = this.rotVec.length();
+    const total = this.rotVec.clone().add(this.lean);
+    const angle = total.length();
     if (angle < 1e-4) return;
-    const axis = this.rotVec.clone().divideScalar(angle);
+    const axis = total.divideScalar(angle);
     const q = new THREE.Quaternion(), m = new THREE.Matrix4(), t1 = new THREE.Matrix4(), t2 = new THREE.Matrix4();
     const p = new THREE.Vector3();
     for (const pv of this.pivots) {
@@ -192,14 +206,54 @@ export interface Fighter {
   /** Seconds left of being "down" (no damage taken, no control). */
   downTime: number;
   capsules: Capsule[];
+  /** Seconds of being knocked off balance (thrown / shoved) — no control,
+   *  no health loss. */
+  stagger?: number;
+  /** Velocity imposed from outside (being dragged / shoved), m/s. Consumed
+   *  by whatever drives the fighter; decays each frame. */
+  push?: THREE.Vector3;
+  /** Grabs currently held on this fighter (count). */
+  grabbedBy?: number;
+  /** Set by the grabbed fighter to wrench free; the grabber releases. */
+  breakFree?: boolean;
+  /** Id of the fighter whose blade this fighter is holding — that blade
+   *  can't cut this fighter while held. */
+  holdingBladeOf?: string | null;
+  /** Per-region health (see Region). */
+  limbs?: Record<Region, number>;
+  /** Seconds left of "Parried" — blade knocked away, hands stunned. */
+  parried?: number;
+  /** Seconds left of the riposte window after a strong parry. */
+  riposte?: number;
+}
+
+/** A blade stuck in a body (Constraint_Weapon_Stuck_BP): pinned to a bone,
+ *  freed by pulling along the blade; wiggling shreds the bone. */
+export interface StuckBlade {
+  attacker: Fighter;
+  target: Fighter;
+  bone: number;
+  /** Entry point in the bone's local frame. */
+  local: THREE.Vector3;
+  region: Region;
+  depth: number;
+  strength: number;
+  point: THREE.Vector3;
 }
 
 export type CombatEvent =
   | { kind: "hit"; attacker: Fighter; target: Fighter; point: THREE.Vector3; dir: THREE.Vector3;
-      speed: number; damage: number; zone: Zone; thrust: boolean }
+      speed: number; damage: number; zone: Zone; thrust: boolean;
+      /** Which damage channel dominated (Deal Complex Damage's three channels). */
+      channel: "cut" | "stab" | "blunt"; module: "blade" | "hilt"; region: Region; bone: number; edge: number }
   | { kind: "parry"; a: Fighter; b: Fighter; point: THREE.Vector3; normal: THREE.Vector3; speed: number }
   | { kind: "graze"; attacker: Fighter; target: Fighter; point: THREE.Vector3; speed: number }
-  | { kind: "down"; target: Fighter };
+  | { kind: "down"; target: Fighter }
+  | { kind: "flat"; attacker: Fighter; target: Fighter; point: THREE.Vector3; speed: number; damage: number }
+  | { kind: "stuck"; stuck: StuckBlade }
+  | { kind: "unstuck"; stuck: StuckBlade; torn: boolean }
+  | { kind: "wrecked"; target: Fighter; region: Region; point: THREE.Vector3 }
+  | { kind: "parried"; attacker: Fighter; defender: Fighter; point: THREE.Vector3 };
 
 const BLADE_RADIUS = 0.018;
 const HIT_SPEED = 2.2;       // m/s at the contact point to count as a blow
@@ -208,6 +262,11 @@ const PARRY_COOLDOWN = 0.12;
 
 export class CombatSystem {
   readonly fighters = new Map<string, Fighter>();
+  readonly stuck: StuckBlade[] = [];
+  /** Global damage multipliers (Player / NPC Damage Rate). */
+  playerDamageRate = 1;
+  npcDamageRate = 1;
+  playerId: string | null = null;
   private time = 0;
   private readonly cooldown = new Map<string, number>();
   /** Last frame's blade segment per fighter, for swept (anti-tunnelling)
@@ -226,10 +285,29 @@ export class CombatSystem {
     const list = [...this.fighters.values()];
     for (const f of list) {
       f.capsules = this.colliders.build(f.agent.actor.worldMatrices as THREE.Matrix4[]);
+      if (f.stagger && f.stagger > 0) f.stagger = Math.max(0, f.stagger - dt);
+      if (f.parried) f.parried = Math.max(0, f.parried - dt);
+      if (f.riposte) f.riposte = Math.max(0, f.riposte - dt);
+      if (f.push) f.push.multiplyScalar(Math.exp(-dt * 5));
       if (f.downTime > 0) {
         f.downTime -= dt;
-        if (f.downTime <= 0) f.health = f.maxHealth;
+        if (f.downTime <= 0) { f.health = f.maxHealth; f.limbs = freshLimbs(); }
       }
+    }
+
+    // Bodies don't overlap: shove apart fighters closer than ~0.55 m
+    // (unless one is holding the other — wrestling is close work).
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const A = list[i], B = list[j];
+      const pa = A.agent.getPosition(), pb = B.agent.getPosition();
+      const dx = pb[0] - pa[0], dz = pb[2] - pa[2];
+      const d = Math.hypot(dx, dz);
+      const min = (A.grabbedBy || B.grabbedBy) ? 0.42 : 0.55;
+      if (d >= min || d < 1e-4) continue;
+      const k = (min - d) * 6;
+      const n = new THREE.Vector3(dx / d, 0, dz / d);
+      (A.push ?? (A.push = new THREE.Vector3())).addScaledVector(n, -k);
+      (B.push ?? (B.push = new THREE.Vector3())).addScaledVector(n, k);
     }
 
     const armed = list.filter((f) => f.sword?.ready && f.sword.swordVisible);
@@ -296,7 +374,18 @@ export class CombatSystem {
       const key = `p:${A.id}:${B.id}`;
       const speed = Math.abs(vn);
       if (speed > 1.2 && this.ready(key, PARRY_COOLDOWN)) {
-        events.push({ kind: "parry", a: A, b: B, point: c1.clone().lerp(c2, 0.5), normal: n, speed });
+        const point = c1.clone().lerp(c2, 0.5);
+        events.push({ kind: "parry", a: A, b: B, point, normal: n, speed });
+        // StopThatBlade: the faster (attacking) blade stopped by a steadier
+        // one is "Parried" — hands stunned briefly — and the defender gets a
+        // riposte window.
+        const sA = va.length(), sB = vb.length();
+        if (Math.max(sA, sB) > 4 && Math.abs(sA - sB) > 2) {
+          const [atk, def] = sA > sB ? [A, B] : [B, A];
+          atk.parried = 0.45; def.riposte = 0.8;
+          atk.sword?.stun(0.45);
+          events.push({ kind: "parried", attacker: atk, defender: def, point });
+        }
       }
     }
 
@@ -308,7 +397,8 @@ export class CombatSystem {
       for (let k = 1; k <= SUB && !best; k++) {
         const b = at(sa, k / SUB);
         for (const T of list) {
-          if (T === A) continue;
+          if (T === A || T.holdingBladeOf === A.id) continue;
+          if (this.stuck.some((st) => st.attacker === A)) continue;
           for (const cap of T.capsules) {
             const { s, dist2 } = closestSegSeg(b.g, b.t, cap.a, cap.b, c1, c2);
             const r = cap.r + BLADE_RADIUS;
@@ -337,21 +427,146 @@ export class CombatSystem {
         A.sword!.impulseTip(dv.divideScalar(lever));
       }
       const speed = Math.max(-vn, 0) + v.length() * 0.25;
-      const key = `h:${A.id}:${T.id}`;
-      const thrust = s > 0.8 && v.dot(bladeDir) > 0.6 * v.length();
-      if (speed > HIT_SPEED && T.downTime <= 0 && this.ready(key, HIT_COOLDOWN)) {
-        const damage = Math.round(ZONE_DAMAGE[cap.zone] * THREE.MathUtils.clamp((speed - 1.5) * 6.5, 3, 42) * (thrust ? 1.3 : 1) * (A.damageScale ?? 1));
-        const dir = v.lengthSq() > 1e-6 ? v.clone().normalize() : n.clone().negate();
-        T.health = Math.max(0, T.health - damage);
-        T.reactor.impulse(dir, Math.min(1.2 + speed * 0.45, 5.5) * (cap.zone === "head" ? 1.3 : 1));
-        events.push({ kind: "hit", attacker: A, target: T, point: pb.clone().lerp(pc, 0.5), dir, speed, damage, zone: cap.zone, thrust });
-        if (T.health <= 0) { T.downTime = 3.5; events.push({ kind: "down", target: T }); }
-      } else if (speed > 0.8 && this.ready(`g:${A.id}:${T.id}`, 0.25)) {
-        events.push({ kind: "graze", attacker: A, target: T, point: pb, speed });
+      this.resolveHit(A, T, cap, s, v, bladeDir, speed, pb.clone().lerp(pc, 0.5), n, "blade", events);
+    }
+
+    // --- hilt (pommel + guard) vs body: blunt module strikes ---------------
+    for (const A of armed) {
+      if (this.stuck.some((st) => st.attacker === A)) continue;
+      const p = new THREE.Vector3(), g = new THREE.Vector3();
+      A.sword!.hiltSegment(p, g);
+      const vg = A.sword!.gripVelocity();
+      for (const T of list) {
+        if (T === A) continue;
+        for (const cap of T.capsules) {
+          const { dist2 } = closestSegSeg(p, g, cap.a, cap.b, c1, c2);
+          const r = cap.r + 0.03;
+          if (dist2 > r * r) continue;
+          const n = c1.clone().sub(c2).normalize();
+          const vn = vg.dot(n);
+          if (vn < 0) A.sword!.impulseGrip(n.clone().multiplyScalar(-vn * 0.8));
+          this.resolveHit(A, T, cap, 0, vg, n.clone().negate(), Math.max(-vn, 0), c1.clone().lerp(c2, 0.5), n, "hilt", events);
+          break;
+        }
       }
     }
+
+    this.updateStuck(dt, events);
     for (const [f, sg] of seg) this.prevBlade.set(f.id, { g: sg.g.clone(), t: sg.t.clone() });
     return events;
+  }
+
+  /** Deal Complex Damage: cut / stab / blunt channels from blade speed,
+   *  edge alignment (edge-direction · velocity) and blade position. */
+  private resolveHit(
+    A: Fighter, T: Fighter, cap: Capsule, s: number, v: THREE.Vector3, bladeDir: THREE.Vector3,
+    speed: number, point: THREE.Vector3, n: THREE.Vector3, module: "blade" | "hilt", events: CombatEvent[],
+  ): void {
+    const key = `h:${A.id}:${T.id}`;
+    const vl = v.length();
+    const vhat = vl > 1e-6 ? v.clone().divideScalar(vl) : n.clone().negate();
+    // Edge alignment: the blade's edges lie along its width axis.
+    const edgeDir = new THREE.Vector3(1, 0, 0).applyQuaternion(A.sword!.swordQuaternion);
+    const edge = module === "blade" ? Math.abs(edgeDir.dot(vhat)) : 0;
+    // Stab: the blade moving point-first along its own axis (Stab Rate),
+    // biting with its forward part.
+    const along = bladeDir.dot(vhat);
+    const thrust = module === "blade" && s > 0.35 && (along > 0.6 || (A.sword!.thrusting && along > 0.25));
+    const cutGate = thrust ? 0 : THREE.MathUtils.smoothstep(edge, 0.45, 0.8);
+    if (!(speed > HIT_SPEED && T.downTime <= 0 && this.ready(key, HIT_COOLDOWN))) {
+      if (speed > 0.8 && this.ready(`g:${A.id}:${T.id}`, 0.25)) events.push({ kind: "graze", attacker: A, target: T, point, speed });
+      return;
+    }
+    const power = THREE.MathUtils.clamp((speed - 1.5) * 6.5, 3, 42);
+    const cut = power * cutGate;
+    const stab = thrust ? power * 1.3 : 0;
+    const blunt = power * (module === "hilt" ? 0.6 : 0.28) * (1 - cutGate);
+    const channel: "cut" | "stab" | "blunt" = stab > 0 ? "stab" : cut >= blunt ? "cut" : "blunt";
+    const rate = A.id === this.playerId ? this.playerDamageRate : this.npcDamageRate;
+    const damage = Math.max(1, Math.round(ZONE_DAMAGE[cap.zone] * (Math.max(cut, stab) + blunt) * (A.damageScale ?? 1) * rate));
+    T.health = Math.max(0, T.health - damage);
+    T.reactor.impulse(vhat, Math.min(1.2 + speed * (channel === "blunt" ? 0.6 : 0.45), 5.5) * (cap.zone === "head" ? 1.3 : 1));
+    if (channel === "blunt" && module === "blade") {
+      events.push({ kind: "flat", attacker: A, target: T, point, speed, damage });
+    } else {
+      events.push({ kind: "hit", attacker: A, target: T, point, dir: vhat, speed, damage, zone: cap.zone, thrust,
+        channel, module, region: cap.region, bone: cap.bone, edge });
+    }
+    this.damageRegion(T, cap.region, damage * (channel === "blunt" ? 0.7 : 1.3), point, events);
+    // A hard thrust bites in and sticks (Constraint_Weapon_Stuck).
+    if (channel === "stab" && speed > 2.4 && T.health > 0 && cap.zone !== "head") {
+      const depth = THREE.MathUtils.clamp(0.07 + (speed - 2.4) * 0.03, 0.07, 0.2);
+      const w = T.agent.actor.worldMatrices;
+      const local = point.clone().applyMatrix4(w[cap.bone].clone().invert());
+      const st: StuckBlade = { attacker: A, target: T, bone: cap.bone, local, region: cap.region, depth, strength: 1, point: point.clone() };
+      this.stuck.push(st);
+      A.sword!.setStuck(point, depth);
+      events.push({ kind: "stuck", stuck: st });
+    }
+    if (T.health <= 0 && T.downTime <= 0) { T.downTime = 3.5; events.push({ kind: "down", target: T }); }
+  }
+
+  private damageRegion(T: Fighter, region: Region, amount: number, point: THREE.Vector3, events: CombatEvent[]): void {
+    const limbs = T.limbs ?? (T.limbs = freshLimbs());
+    if (limbs[region] <= 0) return;
+    limbs[region] = Math.max(0, limbs[region] - amount);
+    if (limbs[region] > 0) return;
+    events.push({ kind: "wrecked", target: T, region, point: point.clone() });
+    if ((region === "head" || region === "neck") && T.downTime <= 0) {
+      T.health = 0; T.downTime = 3.5;
+      events.push({ kind: "down", target: T });
+    }
+  }
+
+  /** Stuck blades: follow the bone, extract when pulled along the blade,
+   *  shred the bone when wiggled, drag the victim with the pull. */
+  private updateStuck(dt: number, events: CombatEvent[]): void {
+    for (let i = this.stuck.length - 1; i >= 0; i--) {
+      const st = this.stuck[i];
+      const sw = st.attacker.sword;
+      const T = st.target;
+      const free = (torn: boolean) => {
+        sw?.setStuck(null, 0);
+        this.stuck.splice(i, 1);
+        events.push({ kind: "unstuck", stuck: st, torn });
+      };
+      if (!sw?.armed || !sw.swordVisible || !this.fighters.has(T.id)) { free(false); continue; }
+      const w = T.agent.actor.worldMatrices;
+      st.point.copy(st.local).applyMatrix4(w[st.bone]);
+      const { axial, lateral } = sw.stuckPull();
+      // Wiggling loosens the grip of the wound and shreds the bone.
+      // Dead zones: a resting hand doesn't loosen it — only a deliberate
+      // pull (hands drawn well back) or a real wiggle does.
+      const wiggle = Math.max(0, lateral - 0.25);
+      st.strength = Math.max(0.25, st.strength - wiggle * 0.8 * dt);
+      st.depth -= Math.max(0, axial - 0.15) * 1.2 * dt / st.strength;
+      if (wiggle > 0) {
+        const inside = wiggle * 7 * dt;
+        T.health = Math.max(0, T.health - inside);
+        this.damageRegion(T, st.region, wiggle * 12 * dt, st.point, events);
+        T.reactor.impulse(new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5), wiggle * 2 * dt);
+      }
+      // Pulling on a stuck blade hauls the victim along.
+      const haul = sw.stuckHaul().setY(0).multiplyScalar(3);
+      if (haul.length() > 2) haul.setLength(2);
+      const push = T.push ?? (T.push = new THREE.Vector3());
+      if (haul.lengthSq() > push.lengthSq()) push.copy(haul);
+      if (T.health <= 0 && T.downTime <= 0) { T.downTime = 3.5; events.push({ kind: "down", target: T }); }
+      const limbs = T.limbs;
+      if (limbs && limbs[st.region] <= 0 && st.region !== "body") { free(true); continue; }
+      if (st.depth <= 0.015) { free(false); continue; }
+      sw.setStuck(st.point, st.depth);
+    }
+  }
+
+  /** Drop any stuck record involving `f` (e.g. when it loses its sword). */
+  releaseStuck(f: Fighter): void {
+    for (let i = this.stuck.length - 1; i >= 0; i--) {
+      if (this.stuck[i].attacker === f || this.stuck[i].target === f) {
+        this.stuck[i].attacker.sword?.setStuck(null, 0);
+        this.stuck.splice(i, 1);
+      }
+    }
   }
 
   private ready(key: string, cooldown: number): boolean {

@@ -230,6 +230,11 @@ export class HalfSword {
   halfGrip = false;
   settings: HalfSwordSettings = { ...DEFAULT_HALF_SWORD };
 
+  /** Whether a sword is in hand. Unarmed, both hands are free hands. */
+  armed = true;
+  /** Hands whose arm is wrecked — they hang limp and can't hold anything. */
+  readonly disabled: Record<HandSide, boolean> = { Left: false, Right: false };
+
   /** Final sword transform for the renderer (valid after apply()). */
   readonly swordPosition = new THREE.Vector3();
   readonly swordQuaternion = new THREE.Quaternion();
@@ -262,7 +267,20 @@ export class HalfSword {
   private thrustAmt = 0;
   /** Seconds left of the "come to guard" lift after grabbing the sword. */
   private readyLift = 0;
+  /** Per-hand world-space override (grabbing / holding something). */
+  private readonly overrides: Record<HandSide, { pos: THREE.Vector3; closed: boolean } | null> = { Left: null, Right: null };
+  /** Palm-centre world position per hand, from the last apply(). */
+  private readonly gripPoints: Record<HandSide, THREE.Vector3> = { Left: new THREE.Vector3(), Right: new THREE.Vector3() };
   private wasActive = false;
+  /** Seconds left of a parry stun (hands can't drive the blade). */
+  private stunTime = 0;
+  /** Stuck-in-body constraint: entry point + depth of the tip inside. */
+  private stuckAnchor: THREE.Vector3 | null = null;
+  private stuckDepth = 0;
+  private stuckAxial = 0;
+  private stuckLateral = 0;
+  private readonly stuckHaulV = new THREE.Vector3();
+  private readonly lastGripTarget = new THREE.Vector3();
   /** Last physics substep length (for velocity ↔ Verlet conversions). */
   private lastH = 1 / 240;
 
@@ -281,7 +299,11 @@ export class HalfSword {
 
   // --- read-only views for combat / AI -----------------------------------
   get ready(): boolean { return this.enabled && this.simReady && this.haveBody; }
+  /** Body frame known (hands can be driven, armed or not). */
+  get active(): boolean { return this.enabled && this.haveBody; }
   get isTwoHanded(): boolean { return this.twoHanded; }
+  /** Mid-thrust (hands driving the point out). */
+  get thrusting(): boolean { return this.thrustAmt > 0.35; }
   get chestPosition(): THREE.Vector3 { return this.chest; }
   get bodyForward(): THREE.Vector3 { return this.fwd; }
   get bodyRight(): THREE.Vector3 { return this.right; }
@@ -298,6 +320,79 @@ export class HalfSword {
     guard.copy(this.swordPosition).addScaledVector(dir, 0.07);
     tip.copy(this.swordPosition).addScaledVector(dir, SWORD.bladeLength);
   }
+  /** Pommel → crossguard segment (blunt strike surfaces). */
+  hiltSegment(pommel: THREE.Vector3, guard: THREE.Vector3): void {
+    const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(this.swordQuaternion);
+    pommel.copy(this.swordPosition).addScaledVector(dir, -0.17);
+    guard.copy(this.swordPosition).addScaledVector(dir, 0.06);
+  }
+  /** Parried: the hands lose control of the blade for `t` seconds. */
+  stun(t: number): void { this.stunTime = Math.max(this.stunTime, t); }
+  get stunned(): boolean { return this.stunTime > 0; }
+  /** Pin the blade in a body at `anchor` (entry point) with `depth` of blade
+   *  inside, or release (null). */
+  setStuck(anchor: THREE.Vector3 | null, depth: number): void {
+    if (!anchor) { this.stuckAnchor = null; return; }
+    if (this.stuckAnchor) this.stuckAnchor.copy(anchor); else this.stuckAnchor = anchor.clone();
+    this.stuckDepth = depth;
+  }
+  get isStuck(): boolean { return this.stuckAnchor !== null; }
+  /** How hard the hands pull the stuck blade out along its axis (m of
+   *  spring stretch) and how fast they wiggle it sideways (m/s). */
+  stuckPull(): { axial: number; lateral: number } { return { axial: this.stuckAxial, lateral: this.stuckLateral }; }
+  /** Horizontal pull the hands put on the stuck victim (m). */
+  stuckHaul(): THREE.Vector3 { return this.stuckHaulV.clone(); }
+
+  /** Drive a hand to a world position (grab reach / holding), or release. */
+  setHandOverride(side: HandSide, pos: THREE.Vector3 | null, closed = false): void {
+    if (!pos) { this.overrides[side] = null; return; }
+    const o = this.overrides[side];
+    if (o) { o.pos.copy(pos); o.closed = closed; } else this.overrides[side] = { pos: pos.clone(), closed };
+  }
+  hasOverride(side: HandSide): boolean { return this.overrides[side] !== null; }
+  /** Is this hand holding the sword (main hand, or off hand on the grip)? */
+  handOnSword(side: HandSide): boolean {
+    if (!this.armed) return false;
+    return side === this.mainSide || (this.twoHanded && !this.overrides[side]);
+  }
+  shoulderPosition(side: HandSide, out = new THREE.Vector3()): THREE.Vector3 { return out.copy(this.shoulder[side]); }
+  armReach(side: HandSide): number { const a = this.arms[side]; return (a.upperLen + a.foreLen) * 0.95; }
+  /** Where the mouse (offset) puts this hand, clamped to reach. */
+  handTarget(side: HandSide, out = new THREE.Vector3()): THREE.Vector3 {
+    this.toWorld(this.hands[side].offset, out);
+    const sh = this.shoulder[side], r = this.armReach(side);
+    const d = out.clone().sub(sh);
+    if (d.length() > r) out.copy(sh).addScaledVector(d.normalize(), r);
+    return out;
+  }
+  /** Rendered palm-centre position (last apply()). */
+  handPoint(side: HandSide, out = new THREE.Vector3()): THREE.Vector3 { return out.copy(this.gripPoints[side]); }
+  /** Body-frame offset → world. */
+  bodyToWorld(o: THREE.Vector3, out = new THREE.Vector3()): THREE.Vector3 { return this.toWorld(o, out); }
+
+  /** Let go of the sword. Returns its transform + motion so the caller can
+   *  spawn a loose sword; null when not armed. */
+  dropSword(): { position: THREE.Vector3; quaternion: THREE.Quaternion; velocity: THREE.Vector3; angularVelocity: THREE.Vector3 } | null {
+    if (!this.armed || !this.swordVisible) return null;
+    const velocity = this.gripVel.clone();
+    const tipV = this.tipVelocity();
+    const angularVelocity = new THREE.Vector3().crossVectors(this.blade, tipV.sub(velocity)).divideScalar(SWORD.bladeLength);
+    const out = { position: this.swordPosition.clone(), quaternion: this.swordQuaternion.clone(), velocity, angularVelocity };
+    this.armed = false;
+    this.simReady = false;
+    this.swordVisible = false;
+    return out;
+  }
+
+  /** Take up a sword in `side`'s hand. */
+  pickUp(side: HandSide): void {
+    this.armed = true;
+    this.mainSide = side;
+    this.overrides[side] = null;
+    this.simReady = false;
+    this.hands[side].rotW = 0;
+  }
+
   /** Change the tip's velocity by `dv` (m/s) — contact response. */
   impulseTip(dv: THREE.Vector3): void { this.tipPrev.addScaledVector(dv, -this.lastH); }
   /** Move the tip without changing its velocity (penetration fix-up). */
@@ -335,14 +430,17 @@ export class HalfSword {
     if (dt <= 1e-5) return;   // hit-stop freeze
     const main = this.mainSide, off = this.offSide;
     const held: Record<HandSide, boolean> = { Left: c.leftHeld, Right: c.rightHeld };
-    const two = held.Left && held.Right;
+    const two = this.armed && held.Left && held.Right && !this.overrides[off] && !this.disabled[off];
     this.twoHanded = two;
 
     // --- mouse → hand targets (body frame) -------------------------------
     const s = this.settings.sensitivity;
     // Mirror x so "mouse right" moves the hand to the character's right.
-    const d = new THREE.Vector3(c.dx * s, -c.dy * s, -c.wheel * 0.0006);
+    this.stunTime = Math.max(0, this.stunTime - dt);
+    const stunned = this.stunTime > 0;
+    const d = stunned ? new THREE.Vector3() : new THREE.Vector3(c.dx * s, -c.dy * s, -c.wheel * 0.0006);
     const driven: HandSide[] = two ? [main] : ([ "Left", "Right" ] as HandSide[]).filter((h) => held[h]);
+    const easeU = (cur: number, target: number, rate: number) => cur + (target - cur) * (1 - Math.exp(-dt * rate));
     for (const h of driven) {
       const o = this.hands[h].offset.add(d);
       // x is in the character's right direction; each hand may cross the
@@ -351,6 +449,19 @@ export class HalfSword {
       o.x = sideSign * THREE.MathUtils.clamp(o.x * sideSign, -0.28, 0.6);
       o.y = THREE.MathUtils.clamp(o.y, -0.75, 0.5);
       o.z = THREE.MathUtils.clamp(o.z, 0.1, 0.7);
+    }
+    if (!this.armed) {
+      // Bare hands: each hand follows the mouse while its button is held,
+      // or the grab override; otherwise the network's arm swing.
+      for (const side of ["Left", "Right"] as HandSide[]) {
+        const hs = this.hands[side], ov = this.overrides[side];
+        const on = (held[side] || ov !== null) && !this.disabled[side];
+        hs.w = easeU(hs.w, on ? 1 : 0, 9);
+        hs.curl = easeU(hs.curl, ov ? (ov.closed ? 1 : 0.35) : held[side] ? 0.55 : 0.2, 12);
+        hs.rotW = easeU(hs.rotW, ov ? 0.85 : 0, 9);
+      }
+      this.wasActive = false;
+      return;
     }
     // Two hands on the sword pull the grip toward the centreline (half-sword
     // stance even more so), so the off arm doesn't have to cross the chest.
@@ -380,9 +491,10 @@ export class HalfSword {
     mh.w = ease(mh.w, 1, 10); mh.curl = ease(mh.curl, 1, 12); mh.rotW = ease(mh.rotW, 1, 10);
     const offOnSword = two;
     const offFree = !two && held[off];
-    oh.w = ease(oh.w, offOnSword || offFree ? 1 : 0, 8);
-    oh.curl = ease(oh.curl, offOnSword ? 1 : offFree ? 0.55 : 0.2, 10);
-    oh.rotW = ease(oh.rotW, offOnSword ? 1 : 0, 8);
+    const offOv = this.overrides[off];
+    oh.w = ease(oh.w, offOnSword || offFree || offOv ? 1 : 0, 8);
+    oh.curl = ease(oh.curl, offOv ? (offOv.closed ? 1 : 0.35) : offOnSword ? 1 : offFree ? 0.55 : 0.2, 10);
+    oh.rotW = ease(oh.rotW, offOv ? 0.85 : offOnSword ? 1 : 0, 8);
 
     // --- sword simulation --------------------------------------------------
     const target = this.toWorld(mh.offset);
@@ -424,9 +536,12 @@ export class HalfSword {
       const out = this.toWorld(new THREE.Vector3(side * 0.06, THREE.MathUtils.clamp(mh.offset.y, -0.25, 0.2), 0.78));
       const fromSh2 = out.clone().sub(this.shoulder[main]);
       if (fromSh2.length() > reach) out.copy(this.shoulder[main]).addScaledVector(fromSh2.normalize(), reach);
-      target.lerp(out, this.thrustAmt);
+      // Point on line first, then extend: the blade aligns quickly and the
+      // hands only shoot out once it's pointing — so the tip travels along
+      // the blade's own axis (a stab, not a cut).
+      target.lerp(out, this.thrustAmt * this.thrustAmt);
       const aim = this.fwd.clone().addScaledVector(UP, 0.04).normalize();
-      guard.lerp(aim, this.thrustAmt).normalize();
+      guard.lerp(aim, Math.min(1, this.thrustAmt * 2.2)).normalize();
     }
     const L = SWORD.bladeLength;
     if (!this.simReady) {
@@ -434,8 +549,10 @@ export class HalfSword {
       this.tip.copy(target).addScaledVector(guard, L); this.tipPrev.copy(this.tip);
       this.simReady = true;
     }
-    const omega = (two ? 24 : active ? 17 : 9) + this.thrustAmt * 10;
-    const wrist = (two ? 80 : active ? 38 : 14) + this.thrustAmt * 60;
+    const stunK = stunned ? 0.35 : 1;
+    const omega = ((two ? 24 : active ? 17 : 9) + this.thrustAmt * 10) * stunK;
+    const wrist = ((two ? 80 : active ? 38 : 14) + this.thrustAmt * 60) * stunK;
+    this.lastGripTarget.copy(target);
     const g = 9.81 * 0.4 * this.settings.bladeWeight;
     const steps = 4, h = dt / steps;
     this.lastH = h;
@@ -452,8 +569,41 @@ export class HalfSword {
       if (next.y < 0.03) next.y = 0.03;
       this.tipPrev.copy(this.tip);
       this.tip.copy(next);
+      if (this.stuckAnchor) this.applyStuck(h);
+    }
+    if (this.stuckAnchor) {
+      // Pull diagnostics for the combat layer.
+      const dir = this.stuckAnchor.clone().sub(this.grip).normalize();
+      const want = target.clone().sub(this.grip);
+      this.stuckAxial = Math.max(0, -want.dot(dir));
+      const lat = this.gripVel.clone().addScaledVector(dir, -this.gripVel.dot(dir));
+      this.stuckLateral = lat.length();
+      this.stuckHaulV.copy(want);
+    } else {
+      this.stuckAxial = this.stuckLateral = 0;
+      this.stuckHaulV.set(0, 0, 0);
     }
     this.blade.copy(this.tip).sub(this.grip).normalize();
+  }
+
+  /** Keep the blade through its entry point: the grip may swing around the
+   *  wound (wiggle) but can't slide the blade out — extraction is decided by
+   *  the combat layer via `depth`. */
+  private applyStuck(h: number): void {
+    const A = this.stuckAnchor!;
+    const L = SWORD.bladeLength;
+    const outside = Math.max(0.05, L - this.stuckDepth);
+    const dir = A.clone().sub(this.grip);
+    if (dir.lengthSq() < 1e-8) dir.copy(this.blade);
+    dir.normalize();
+    const pinned = A.clone().addScaledVector(dir, -outside);
+    const corr = pinned.sub(this.grip);
+    this.grip.add(corr);
+    // Remove velocity along the blade (it's held by the wound).
+    this.gripVel.addScaledVector(dir, -this.gripVel.dot(dir));
+    this.gripVel.addScaledVector(corr, 0.2 / h);
+    this.tip.copy(A).addScaledVector(dir, this.stuckDepth);
+    this.tipPrev.copy(this.tip);
   }
 
   /** Pose override for the player's world matrices (see Actor.poseOverride). */
@@ -467,7 +617,21 @@ export class HalfSword {
     this.right.crossVectors(this.fwd, UP).normalize();
     for (const side of ["Left", "Right"] as HandSide[]) this.pivotOf(world, this.arms[side], this.shoulder[side]);
     this.haveBody = true;
-    if (!this.enabled || !this.simReady) { this.swordVisible = false; return; }
+    if (!this.enabled) { this.swordVisible = false; return; }
+    if (!this.armed) {
+      this.swordVisible = false;
+      for (const side of ["Left", "Right"] as HandSide[]) {
+        const hs = this.hands[side], arm = this.arms[side];
+        const ov = this.overrides[side];
+        const target = ov ? ov.pos.clone() : this.handTarget(side);
+        if (this.disabled[side]) { hs.w = 0; hs.curl = 0; }
+        if (hs.w > 1e-3) this.solveArm(world, arm, hs, target, this.reachRotation(arm, target), true);
+        this.curlFingers(world, arm, hs.curl);
+        this.recordGripPoint(world, side);
+      }
+      return;
+    }
+    if (!this.simReady) { this.swordVisible = false; return; }
 
     const main = this.mainSide, off = this.offSide;
     // Main hand: grip centred on the simulated grip point, blade along the
@@ -478,12 +642,22 @@ export class HalfSword {
     // Off hand: on the handle / blade when two-handed, else free.
     const oh = this.hands[off];
     const along = this.halfGrip ? SWORD.halfSwordGrip : SWORD.offHandHilt;
-    const offGrip = this.twoHanded || oh.rotW > 0.5
-      ? this.grip.clone().addScaledVector(this.blade, along)
-      : this.toWorld(oh.offset);
-    const offRot = this.gripRotation(this.arms[off], offGrip);
-    if (oh.w > 1e-3) this.solveArm(world, this.arms[off], oh, offGrip, offRot);
+    const offOv = this.overrides[off];
+    if (this.disabled[off]) {
+      oh.w = 0; oh.curl = 0;
+    } else if (offOv) {
+      const t = offOv.pos.clone();
+      if (oh.w > 1e-3) this.solveArm(world, this.arms[off], oh, t, this.reachRotation(this.arms[off], t), true);
+    } else {
+      const offGrip = this.twoHanded || oh.rotW > 0.5
+        ? this.grip.clone().addScaledVector(this.blade, along)
+        : this.toWorld(oh.offset);
+      const offRot = this.gripRotation(this.arms[off], offGrip);
+      if (oh.w > 1e-3) this.solveArm(world, this.arms[off], oh, offGrip, offRot);
+    }
     this.curlFingers(world, this.arms[off], oh.curl);
+    this.recordGripPoint(world, main);
+    this.recordGripPoint(world, off);
 
     // Sword follows the main hand's final grip.
     const arm = this.arms[main];
@@ -496,6 +670,20 @@ export class HalfSword {
     this.swordQuaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
     this.swordVisible = true;
   };
+
+  private recordGripPoint(world: readonly THREE.Matrix4[], side: HandSide): void {
+    const arm = this.arms[side];
+    this.gripPoints[side].copy(arm.gripOffset).applyQuaternion(rotOf(world[arm.hand])).add(posOf(world[arm.hand]));
+  }
+
+  /** Open reaching hand: fingers along the reach, palm facing down / in. */
+  private reachRotation(arm: ArmRig, target: THREE.Vector3): THREE.Quaternion {
+    const dir = target.clone().sub(this.shoulder[arm.side]).normalize();
+    const palmWant = UP.clone().negate().addScaledVector(this.right, arm.side === "Right" ? -0.6 : 0.6);
+    palmWant.addScaledVector(dir, -palmWant.dot(dir));
+    if (palmWant.lengthSq() < 1e-6) palmWant.copy(this.fwd);
+    return frameRotation(arm.forward, arm.palm, dir, palmWant.normalize());
+  }
 
   /** Where the arm mesh's shoulder pivot currently is. */
   private pivotOf(world: readonly THREE.Matrix4[], arm: ArmRig, out = new THREE.Vector3()): THREE.Vector3 {
@@ -512,7 +700,7 @@ export class HalfSword {
 
   /** Two-bone IK (upper arm + forearm) blended with the network's arm, then
    *  the hand placed so its grip point lands on `gripPoint`. */
-  private solveArm(world: THREE.Matrix4[], arm: ArmRig, hs: HandState, gripPoint: THREE.Vector3, handRot0: THREE.Quaternion): void {
+  private solveArm(world: THREE.Matrix4[], arm: ArmRig, hs: HandState, gripPoint: THREE.Vector3, handRot0: THREE.Quaternion, reach = false): void {
     const sideSign = arm.side === "Right" ? 1 : -1;
     const lateral = this.right.clone().multiplyScalar(sideSign);
     const one = new THREE.Vector3(1, 1, 1);
@@ -542,7 +730,9 @@ export class HalfSword {
     const Ra = rotOf(world[arm.arm]), Rf = rotOf(world[arm.fore]), Rh = rotOf(world[arm.hand]);
     const L1 = arm.upperLen, L2 = arm.foreLen;
     const gripping = hs.rotW > 0.5;
-    const bladeAxis = this.blade;
+    // Free roll axis: the handle when gripping the sword, the reach
+    // direction for an open / grabbing hand.
+    const bladeAxis = reach ? gripPoint.clone().sub(this.shoulder[arm.side]).normalize() : this.blade;
 
     // --- search elbow swivel × grip roll ------------------------------------
     // Elbow swivel (rotation of the bend plane about shoulder→hand) and, when

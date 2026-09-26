@@ -165,6 +165,8 @@
       .dmg.crit { color: #ffcf5a; font-size: 18px; }
       .dmg.taken { color: #ff6b5a; }
       .dmg.parry { color: #bfe3ff; font-size: 12px; letter-spacing: 0.12em; }
+      .dmg.grab { color: #d9c7ff; font-size: 11px; letter-spacing: 0.12em; }
+      .dmg.flat { color: #a9b0b8; font-size: 12px; }
       @keyframes dmg-rise {
         0% { opacity: 0; transform: translate(-50%, -30%) scale(0.8); }
         15% { opacity: 1; transform: translate(-50%, -60%) scale(1.1); }
@@ -334,10 +336,11 @@
     <div id="hit-vignette"></div>
     <div id="combat-banner"></div>
     <div id="hs-hint">
-      <div class="grip">right hand sword · relaxed</div>
-      <div><kbd>RMB</kbd> right hand · <kbd>LMB</kbd> left hand · both = two-handed · mouse moves the hand · <kbd>wheel</kbd> reach</div>
-      <div><kbd>Space</kbd> thrust · <kbd>G</kbd> half-sword grip · <kbd>X</kbd> swap hands · <kbd>Q</kbd>/<kbd>E</kbd> turn · <kbd>WASD</kbd> step · <kbd>H</kbd> exit</div>
-      <div>Hands high = chamber, sweep through to cut · Sparring dummy: cut fast to land hits · put your blade in its way to parry · tune it under Half Sword → Sparring dummy</div>
+      <div class="grip">L: free · R: sword</div>
+      <div><kbd>RMB</kbd> right hand · <kbd>LMB</kbd> left hand · both = two-handed · mouse moves the hand · <kbd>wheel</kbd> reach · <kbd>Space</kbd> thrust</div>
+      <div><kbd>Q</kbd> grab left · <kbd>E</kbd> grab right (wrist, neck, blade, swords on the floor) · pull to drag, yank to throw / disarm · <kbd>F</kbd> drop sword</div>
+      <div><kbd>G</kbd> half-sword grip · <kbd>X</kbd> swap hands · mouse (no button) or <kbd>Z</kbd>/<kbd>C</kbd> turn · <kbd>WASD</kbd> step · <kbd>H</kbd> exit</div>
+      <div>Cut with the edge leading — flat hits only bruise · a hard thrust sticks: pull straight back, wiggle to tear</div>
     </div>
     <div id="credit-popup" class="hidden" role="dialog" aria-label="Credits">
       <div class="title">Built on AI4AnimationPy</div>

@@ -10,7 +10,7 @@ p.on('pageerror', e => { if (n++ < 12) console.log('pageerror:', e.message); });
 await p.goto(url + (url.includes('?') ? '&' : '?') + 'nolock');
 await p.waitForFunction(() => window.__vibezzz && document.getElementById('boot').style.display === 'none', null, { timeout: 90000 });
 await p.evaluate(() => { document.querySelector('.tp-dfwv')?.remove(); document.querySelector('.stats-gl')?.remove(); document.querySelectorAll('.joystick-base,#credit-btn,#hs-hint').forEach(e => e.remove()); });
-await p.waitForTimeout(3000);
+await p.waitForTimeout(3000*2);
 await p.keyboard.press('h');
 const side = async () => p.evaluate(() => {
   const a = window.__vibezzz; const me = a.agents.get(a.playerId).agent.getPosition();
@@ -20,9 +20,9 @@ const side = async () => p.evaluate(() => {
   a.controls.target.set(mx, 1.1, mz);
   a.camera.position.set(mx - dz / l * 3.2, 1.6, mz + dx / l * 3.2); a.controls.update();
 });
-const shot = async (name) => { await side(); await p.waitForTimeout(250); await p.screenshot({ path: `${out}_${name}.png` }); };
+const shot = async (name) => { await side(); await p.waitForTimeout(250*2); await p.screenshot({ path: `${out}_${name}.png` }); };
 const state = () => p.evaluate(() => { const a = window.__vibezzz; const d = [...a.dummies.values()][0]; return d.ai.currentState + ' style=' + a.agents.get(d.id).agent.style; });
-await p.waitForTimeout(800);
+await p.waitForTimeout(800*2);
 console.log('t=0.8s', await state());
 await shot('spawn');
 await shot('start');
@@ -40,19 +40,19 @@ const cuts = [
 for (let k = 0; k < 6; k++) {
   const [[wx, wy], [sx, sy]] = cuts[k % cuts.length];
   let x = 500, y = 350;
-  for (let i = 1; i <= 4; i++) { await p.mouse.move(x + wx * i / 4, y + wy * i / 4); await p.waitForTimeout(60); }
+  for (let i = 1; i <= 4; i++) { await p.mouse.move(x + wx * i / 4, y + wy * i / 4); await p.waitForTimeout(60*2); }
   x += wx; y += wy;
-  await p.waitForTimeout(350);
-  for (let i = 1; i <= 3; i++) { await p.mouse.move(x + sx * i / 3, y + sy * i / 3); await p.waitForTimeout(40); }
+  await p.waitForTimeout(350*2);
+  for (let i = 1; i <= 3; i++) { await p.mouse.move(x + sx * i / 3, y + sy * i / 3); await p.waitForTimeout(40*2); }
   x += sx; y += sy;
   if (k === 1 || k === 4) await shot(`swing${k}`);
-  if (k === 5) { await p.keyboard.down('Space'); await p.waitForTimeout(500); await shot('thrust'); await p.keyboard.up('Space'); }
-  await p.waitForTimeout(600);
+  if (k === 5) { await p.keyboard.down('Space'); await p.waitForTimeout(500*2); await shot('thrust'); await p.keyboard.up('Space'); }
+  await p.waitForTimeout(600*2);
   // Return the hands to the middle.
-  for (let i = 1; i <= 3; i++) { await p.mouse.move(x - (wx + sx) * i / 3, y - (wy + sy) * i / 3); await p.waitForTimeout(60); }
+  for (let i = 1; i <= 3; i++) { await p.mouse.move(x - (wx + sx) * i / 3, y - (wy + sy) * i / 3); await p.waitForTimeout(60*2); }
   await p.mouse.move(500, 350);
 }
-await p.waitForTimeout(1500);
+await p.waitForTimeout(1500*2);
 await shot('end');
 console.log('stats', JSON.stringify(await p.evaluate(() => {
   const a = window.__vibezzz; const d = [...a.dummies.values()][0];

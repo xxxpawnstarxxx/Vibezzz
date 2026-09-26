@@ -135,6 +135,58 @@ export class BladeTrail {
   }
 }
 
+/** Wounds that stay on the body: bone-attached marks (Half Sword's
+ *  Attached_Transform_Str / bone-attached decals), placed at the impact
+ *  point in the hit bone's local frame so they follow the animation. */
+export class Wounds {
+  readonly mesh: THREE.InstancedMesh;
+  private readonly slots: { matrices: () => readonly THREE.Matrix4[]; bone: number; local: THREE.Matrix4; age: number }[] = [];
+  private next = 0;
+  private readonly m = new THREE.Matrix4();
+
+  constructor(private readonly max = 160) {
+    const geo = new THREE.SphereGeometry(1, 10, 6);
+    this.mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({
+      color: 0x520404, roughness: 0.35, metalness: 0, envMapIntensity: 0.4,
+    }), max);
+    this.mesh.frustumCulled = false;
+    this.mesh.count = 0;
+  }
+
+  add(matrices: () => readonly THREE.Matrix4[], bone: number, point: THREE.Vector3, normal: THREE.Vector3, size: number, stretch: THREE.Vector3): void {
+    const w = matrices()[bone];
+    if (!w) return;
+    // Flattened ellipsoid lying on the skin, long along the cut direction.
+    const z = normal.clone().normalize();
+    const x = stretch.clone().addScaledVector(z, -stretch.dot(z));
+    if (x.lengthSq() < 1e-6) x.set(1, 0, 0).addScaledVector(z, -z.x);
+    x.normalize();
+    const y = new THREE.Vector3().crossVectors(z, x);
+    const world = new THREE.Matrix4().makeBasis(x, y, z)
+      .scale(new THREE.Vector3(size * 1.8, size * 0.55, size * 0.22))
+      .setPosition(point.clone().addScaledVector(z, -size * 0.05));
+    const local = w.clone().invert().multiply(world);
+    const slot = { matrices, bone, local, age: 0 };
+    if (this.slots.length < this.max) this.slots.push(slot); else this.slots[this.next] = slot;
+    this.next = (this.next + 1) % this.max;
+  }
+
+  /** Drop wounds of a fighter (e.g. it healed / was removed). */
+  clear(matrices?: () => readonly THREE.Matrix4[]): void {
+    for (let i = this.slots.length - 1; i >= 0; i--) if (!matrices || this.slots[i].matrices === matrices) this.slots.splice(i, 1);
+    this.next = this.slots.length % this.max;
+  }
+
+  update(): void {
+    this.mesh.count = this.slots.length;
+    this.slots.forEach((s, i) => {
+      const w = s.matrices()[s.bone];
+      this.mesh.setMatrixAt(i, w ? this.m.multiplyMatrices(w, s.local) : this.m.makeScale(0, 0, 0));
+    });
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+}
+
 export class CombatFx {
   readonly group = new THREE.Group();
   private readonly sparks: ParticlePool;
@@ -172,8 +224,11 @@ export class CombatFx {
   }
 
   /** Body hit: droplets thrown along the blade's travel. */
+  /** Blood Rate (gore setting): scales droplet counts. */
+  bloodRate = 1;
+
   impactAt(point: THREE.Vector3, dir: THREE.Vector3, intensity: number): void {
-    const count = Math.round(THREE.MathUtils.clamp(6 + intensity * 3, 6, 30));
+    const count = Math.round(THREE.MathUtils.clamp(6 + intensity * 3, 6, 30) * this.bloodRate);
     for (let i = 0; i < count; i++) {
       const v = dir.clone().multiplyScalar(0.8 + Math.random() * 1.6)
         .add(new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.8, Math.random() - 0.5).multiplyScalar(1.3));

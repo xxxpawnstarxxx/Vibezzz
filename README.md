@@ -55,7 +55,9 @@ Press **H** (or tick **Half Sword → enabled**) to fight Half Sword-style. The 
 | **Space** | Thrust: drive the point straight out along the centreline |
 | **Wheel** | Reach in / out |
 | **X** | Swap the sword to the other hand |
-| **Q / E** | Turn. The fighter keeps its own heading, so orbiting the camera with MMB doesn't turn it |
+| **Q / E** | Grab with the left / right hand (see below) |
+| **Mouse (no button) / Z / C** | Turn. The fighter keeps its own heading, so orbiting the camera with MMB doesn't turn it |
+| **F** | Drop the sword |
 | **WASD** | Step and move |
 
 **Where your hands go decides the cut.** The blade points from a pivot low in your torso out through your hands, and it leans into the direction the hands are moving:
@@ -78,6 +80,57 @@ The sword is simulated, not animated (`src/runtime/half_sword.ts`):
 - **Skinning** is dual-quaternion for the realistic human (linear blend skinning for Geno), which keeps volume through elbow, shoulder and wrist rotation.
 - The gripping hand rotates to follow the blade, and the fingers curl into a fist around the handle.
 - An idle sword hand sags back to a low guard.
+
+### Grabbing: Q / E (v7)
+
+Hold **Q** to grab with the left hand or **E** with the right, like Half Sword's grip keys. If that hand's mouse button is also held, the mouse aims the hand and it snaps onto anything close by. Otherwise the hand reaches for the nearest thing it can take hold of.
+
+| Grab | What it does |
+| --- | --- |
+| **Wrist / forearm** | Pins their sword arm and drags their grip after your hand. A fast yank can tear the sword loose. |
+| **Neck / collar / head** | Drags them as you pull or walk back. A fast yank throws them off balance. |
+| **Their blade** | Pins it, and it can't cut you while you hold it. Yank to wrench it out of their hands. If your hand is free, you keep it. |
+| **Swords on the floor** | Stoop and pick them up. Unarmed, you take it up; otherwise you carry it and drop it on release. |
+
+- **F** drops your sword.
+- The hand holding the sword can't grab, but the other hand leaves the handle to grab.
+- A held dummy struggles and eventually breaks free, shoving you back.
+- Turning moved to the mouse (with no button held, while the pointer is locked) or **Z / C**.
+
+### From the Half Sword analysis (v7)
+
+These systems follow the four-volume analysis of Half Sword's Blueprint exports:
+
+- **Edge alignment** (Vol 1 §7): a hit only cuts if the blade's edge leads the motion (the dot product of edge direction and velocity is high). Flat hits only bruise ("FLAT").
+- **Three damage channels** (Vol 1 §8): cut, stab and blunt, scaled by speed and body zone.
+  - A stab is point-first motion along the blade.
+  - Pommel and crossguard strikes are their own blunt damage source ("POMMEL"), as in the modular-weapon design (§6).
+- **Stuck blades** (Vol 1 §11, Vol 4 §7): a committed thrust bites in and pins the blade to the bone.
+  - It pulls the victim along with you.
+  - Draw your hands straight back to pull it out.
+  - Wiggling loosens it and shreds the bone. That does damage inside the body and can wreck the limb.
+- **Per-region health** (Vol 4 §8): head, neck, body, arms and legs each have health.
+  - A wrecked arm hangs limp. If it was the sword arm, the sword drops, and that hand can't grab.
+  - A wrecked leg limps at half speed.
+  - A wrecked head or neck puts the fighter down.
+- **Parried → riposte** (Vol 1 §13): a fast blade stopped by a steady one is "Parried", which jars the hands. The defender gets a riposte window, and the dummy uses it.
+- **Dummy AI** (Vol 1 §3, §4, §14): the dummy works from three distance bands (safe, middle, striking) and six behaviours:
+  - **Retreat** when badly hurt.
+  - **Harass**: circles and feints.
+  - **Attack** and **Defend**.
+  - **Safe**: holds its distance.
+  - **Search Weapon**: when disarmed, it walks to a loose sword and picks it up.
+
+  Its attacks follow the analysis's attack stages:
+  - set up intent (a readable telegraph), then a charge (wind-up, forward lunge or shoulder tackle)
+  - then the strike: swing, reverse swing (combos), thrust, or half-sword
+  - then parried or riposte, then finish
+  - **Berserk** at low health: faster, harder hitting, more tackles
+
+  It also struggles out of grabs, wrenches its blade out of you, and fights one-handed with a wrecked arm.
+- **Blood** (Vol 2 §8–9, Vol 4 §9–12): wounds stay on the body and follow the animation, and blades get bloodier with each cut. Half Sword Mode → Gore & damage has sliders for blood rate, your damage and enemy damage.
+
+Not done: severing limbs (Stage 2 of Half Sword's dismemberment) needs mesh cutting. The limb-wrecking above is the gameplay half of it.
 
 ### Combat and the sparring dummy
 

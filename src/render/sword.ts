@@ -12,6 +12,8 @@ export function createSword(): THREE.Group {
 
   const group = new THREE.Group();
   group.name = "Sword";
+  group.userData.steel = steel;
+  group.userData.blood = 0;
 
   // Blade: guard (y = 0.07) → tip (y = bladeLength), narrowing to a point.
   const bladeStart = 0.07;
@@ -45,4 +47,19 @@ export function createSword(): THREE.Group {
   group.traverse((o) => { o.castShadow = true; o.receiveShadow = true; });
   group.visible = false;
   return group;
+}
+
+const CLEAN = new THREE.Color(0xc9ced6);
+const BLOODY = new THREE.Color(0x4a0606);
+
+/** Blood on the blade (0…1): per-module paint, like Half Sword's vertex
+ *  paint — here a tint + roughness shift on the steel. */
+export function setSwordBlood(sword: THREE.Object3D, amount: number): void {
+  const a = THREE.MathUtils.clamp(amount, 0, 1);
+  sword.userData.blood = a;
+  const steel = sword.userData.steel as THREE.MeshStandardMaterial | undefined;
+  if (!steel) return;
+  steel.color.copy(CLEAN).lerp(BLOODY, a * 0.75);
+  steel.roughness = 0.28 + a * 0.35;
+  steel.metalness = 1 - a * 0.45;
 }

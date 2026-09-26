@@ -86,6 +86,8 @@ export interface UIOptions {
     onSwapHands: () => void;
     dummy: { aggression: number; blockSkill: number; fightsBack: boolean; power: number };
     onSpawnDummy: () => void;
+    /** Gore Rate / Blood Rate / damage rates (Half Sword game-mode knobs). */
+    gore: { bloodRate: number; playerDamage: number; enemyDamage: number };
   };
   /** Exposure / environment / skin shading controls. */
   look?: {
@@ -255,6 +257,10 @@ export class UI {
     d.addBinding(h.dummy, "aggression", { min: 0, max: 1, step: 0.05 });
     d.addBinding(h.dummy, "blockSkill", { label: "block skill", min: 0, max: 1, step: 0.05 });
     d.addBinding(h.dummy, "power", { label: "hit power", min: 0.1, max: 1.5, step: 0.05 });
+    const g = folder.addFolder({ title: "Gore & damage", expanded: false });
+    g.addBinding(h.gore, "bloodRate", { label: "blood rate", min: 0, max: 2, step: 0.05 });
+    g.addBinding(h.gore, "playerDamage", { label: "your damage", min: 0.2, max: 3, step: 0.05 });
+    g.addBinding(h.gore, "enemyDamage", { label: "enemy damage", min: 0, max: 3, step: 0.05 });
   }
 
   private buildLookFolder(l: NonNullable<UIOptions["look"]>): void {

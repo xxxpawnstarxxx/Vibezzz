@@ -22,12 +22,19 @@ import { Touch } from "./touch.js";
 import { GamepadInput, PAD } from "./gamepad.js";
 import { HalfSword } from "./runtime/half_sword.js";
 import { HalfSwordInput } from "./half_sword_input.js";
-import { createSword } from "./render/sword.js";
+import { createSword, setSwordBlood } from "./render/sword.js";
+import { LooseSword } from "./runtime/loose_items.js";
+import { GrabController } from "./runtime/grab.js";
+import type { GrabEvent, GrabWorld } from "./runtime/grab.js";
+import type { HandSide } from "./runtime/half_sword.js";
+import type { DummyWorld } from "./runtime/dummy_ai.js";
+import { freshLimbs } from "./runtime/combat.js";
+import type { Region } from "./runtime/combat.js";
 import { BodyColliders, CombatSystem, HitReactor } from "./runtime/combat.js";
 import type { CombatEvent, Fighter } from "./runtime/combat.js";
 import { DummyAI } from "./runtime/dummy_ai.js";
 import type { DummySettings } from "./runtime/dummy_ai.js";
-import { BladeTrail, CombatFx } from "./render/combat_fx.js";
+import { BladeTrail, CombatFx, Wounds } from "./render/combat_fx.js";
 import { Sfx } from "./audio/sfx.js";
 import { Debug } from "./render/debug.js";
 import { UI } from "./render/ui.js";
@@ -155,6 +162,81 @@ async function boot() {
   const dummySettings: DummySettings = { aggression: 0.55, blockSkill: 0.55, fightsBack: true, power: 0.6 };
   let dummyCounter = 0;
   let hitStop = 0;
+  const gore = { bloodRate: 1, playerDamage: 1, enemyDamage: 1 };
+  const wounds = new Wounds();
+  scene.add(wounds.mesh);
+
+  // --- loose swords + grabbing ---------------------------------------------
+  const items: LooseSword[] = [];
+  /** Held sword mesh per fighter id (player: `sword`, dummies: their mesh). */
+  const heldMesh = (f: Fighter): THREE.Group | null =>
+    f.id === playerId ? sword : dummies.get(f.id)?.mesh ?? null;
+  function spawnLoose(position: THREE.Vector3, quaternion: THREE.Quaternion,
+    velocity = new THREE.Vector3(), angular = new THREE.Vector3(), blood = 0): LooseSword {
+    const mesh = createSword();
+    mesh.visible = true;
+    setSwordBlood(mesh, blood);
+    scene.add(mesh);
+    const it = new LooseSword(mesh);
+    it.position.copy(position); it.quaternion.copy(quaternion);
+    it.velocity.copy(velocity); it.angularVelocity.copy(angular);
+    it.cooldown = 0.6;
+    it.sync();
+    items.push(it);
+    return it;
+  }
+  function dropSword(f: Fighter): LooseSword | null {
+    combat.releaseStuck(f);
+    const data = f.sword?.dropSword();
+    if (!data) return null;
+    const mesh = heldMesh(f);
+    const blood = mesh ? (mesh.userData.blood as number) : 0;
+    if (mesh) setSwordBlood(mesh, 0);
+    return spawnLoose(data.position, data.quaternion, data.velocity, data.angularVelocity, blood);
+  }
+  function pickUp(f: Fighter, item: LooseSword, side: HandSide): void {
+    const i = items.indexOf(item);
+    if (i >= 0) items.splice(i, 1);
+    scene.remove(item.mesh);
+    f.sword?.pickUp(side);
+    const mesh = heldMesh(f);
+    if (mesh) setSwordBlood(mesh, (item.mesh.userData.blood as number) ?? 0);
+  }
+  function emitGrab(e: GrabEvent): void {
+    if (e.kind === "grab") { sfx.tap(); popup(e.point, "GRAB", "grab"); }
+    else if (e.kind === "throw") {
+      sfx.hit(5, false); fx.shake(0.02); hitStop = Math.max(hitStop, 0.06);
+      popup(e.point, "THROWN", "crit");
+    } else if (e.kind === "disarm") {
+      sfx.clang(3); fx.shake(0.012);
+      popup(e.point, e.kept ? "DISARMED — YOURS" : "DISARMED", "crit");
+      banner(`${e.target.label.toUpperCase()} DISARMED`);
+    } else if (e.kind === "pickup") { sfx.tap(); popup(e.point, "PICKED UP", "parry"); }
+    else if (e.kind === "broke-free") { sfx.hit(2, false); popup(e.point, "BROKE FREE", "taken"); }
+  }
+  const grabWorld: GrabWorld = {
+    get fighters() { return combat.fighters.values(); },
+    items,
+    dropSword,
+    pickUp,
+    event: emitGrab,
+  };
+  const dummyWorld: DummyWorld = {
+    items,
+    dropSword,
+    pickUp: (f, it, side) => { pickUp(f, it, side); emitGrab({ kind: "pickup", who: f, point: it.position.clone() }); },
+    tackled: (by, target) => {
+      const dir = new THREE.Vector3(...target.agent.getPosition()).sub(new THREE.Vector3(...by.agent.getPosition())).setY(0).normalize();
+      target.stagger = 1.1;
+      target.push = dir.clone().multiplyScalar(2.6);
+      target.reactor.impulse(dir, 4.5);
+      sfx.hit(4, false); hitStop = Math.max(hitStop, 0.05);
+      if (target.id === playerId) fx.shake(0.025);
+      const p = new THREE.Vector3(...target.agent.getPosition()).setY(1.2);
+      popup(p, "TACKLED", target.id === playerId ? "taken" : "crit");
+    },
+  };
+  let grabber: GrabController | null = null;
   /** Fighter heading in Half Sword mode — turned with Q / E; orbiting the
    *  camera (MMB) doesn't turn the fighter. */
   const hsHeading = new THREE.Vector3(0, 0, 1);
@@ -406,6 +488,7 @@ async function boot() {
       onSwapHands: () => halfSword.swapHands(),
       dummy: dummySettings,
       onSpawnDummy: () => spawnDummy(),
+      gore,
     },
     look: {
       params: lookParams,
@@ -520,6 +603,9 @@ async function boot() {
     }
     for (const d of dummies.values()) { scene.remove(d.mesh, d.trail.mesh); }
     dummies.clear();
+    for (const it of items) scene.remove(it.mesh);
+    items.length = 0;
+    wounds.clear();
     agents.clear();
     setPlayer(null);
     ui.rebuildSteerDropdown([]);
@@ -577,8 +663,11 @@ async function boot() {
 
   /** Player sword follows the current biped player; re-hook overrides. */
   function attachHalfSword(): void {
+    grabber?.releaseAll(grabWorld);
     halfSword.reset();
     refreshOverrides();
+    const me = playerId ? combat.fighters.get(playerId) : null;
+    grabber = me ? new GrabController(me, halfSword, bipedEngine.rig.boneNameToIndex) : null;
   }
 
   /** Per-biped pose override: hit-reaction flinch first (it moves the whole
@@ -596,6 +685,7 @@ async function boot() {
   function addFighter(id: string, label: string, agent: NMMAgent): Fighter {
     const f: Fighter = {
       id, label, agent, sword: null, health: 100, maxHealth: 100, downTime: 0, capsules: [],
+      limbs: freshLimbs(), push: new THREE.Vector3(),
       reactor: new HitReactor(boneParents, bipedEngine.rig.boneNameToIndex),
     };
     combat.add(f);
@@ -661,22 +751,40 @@ async function boot() {
     bannerTimer = 2;
   }
 
-  const combatStats = { hits: 0, parries: 0, grazes: 0, damageDealt: 0, damageTaken: 0 };
+  const combatStats = { hits: 0, parries: 0, grazes: 0, flats: 0, stuck: 0, unstuck: 0, damageDealt: 0, damageTaken: 0 };
   function handleCombatEvents(events: CombatEvent[]): void {
     for (const e of events) {
+      if (import.meta.env.DEV) {
+        const log = ((window as unknown as { __events?: unknown[] }).__events ??= []);
+        if (e.kind === "hit" || e.kind === "flat") log.push({ k: e.kind, by: e.attacker.id, speed: +e.speed.toFixed(2), dmg: e.damage,
+          ch: e.kind === "hit" ? e.channel : "flat", edge: e.kind === "hit" ? +e.edge.toFixed(2) : undefined });
+        else if (e.kind !== "graze") log.push({ k: e.kind });
+        if (log.length > 30) log.shift();
+      }
       if (e.kind === "hit") {
         combatStats.hits++;
         if (e.attacker.id === playerId) combatStats.damageDealt += e.damage;
         if (e.target.id === playerId) combatStats.damageTaken += e.damage;
       } else if (e.kind === "parry") combatStats.parries++;
       else if (e.kind === "graze") combatStats.grazes++;
+      else if (e.kind === "flat") combatStats.flats++;
+      else if (e.kind === "stuck") combatStats.stuck++;
+      else if (e.kind === "unstuck") combatStats.unstuck++;
       if (e.kind === "hit") {
         const involvesPlayer = e.attacker.id === playerId || e.target.id === playerId;
-        fx.impactAt(e.point, e.dir, e.speed);
-        sfx.hit(e.speed, e.thrust);
+        const bleeds = e.channel !== "blunt";
+        if (bleeds) fx.impactAt(e.point, e.dir, e.speed);
+        sfx.hit(bleeds ? e.speed : e.speed * 0.6, e.thrust);
         hitStop = Math.max(hitStop, 0.045 + e.damage * 0.0025);
         if (involvesPlayer) fx.shake(0.008 + e.damage * 0.0009);
-        const label = e.thrust ? "THRUST" : e.zone === "head" ? "HEAD" : e.zone === "neck" ? "NECK" : "";
+        if (bleeds && gore.bloodRate > 0) {
+          const T = e.target;
+          const n = e.point.clone().sub(new THREE.Vector3().setFromMatrixPosition(T.agent.actor.worldMatrices[e.bone])).normalize();
+          wounds.add(() => T.agent.actor.worldMatrices, e.bone, e.point, n, e.thrust ? 0.018 : 0.012 + Math.min(e.damage, 30) * 0.0008, e.dir);
+          const m = heldMesh(e.attacker);
+          if (m) setSwordBlood(m, (m.userData.blood as number) + 0.12 * gore.bloodRate);
+        }
+        const label = e.module === "hilt" ? "POMMEL" : e.thrust ? "THRUST" : e.zone === "head" ? "HEAD" : e.zone === "neck" ? "NECK" : "";
         popup(e.point, `${label ? label + " " : ""}${e.damage}`, e.target.id === playerId ? "taken" : e.zone === "head" || e.zone === "neck" ? "crit" : "");
         if (e.target.id === playerId && hud.vignette) {
           hud.vignette.classList.remove("flash");
@@ -692,6 +800,26 @@ async function boot() {
         if (e.speed > 3.5) popup(e.point, "PARRY", "parry");
       } else if (e.kind === "graze") {
         sfx.tap();
+      } else if (e.kind === "flat") {
+        // Flat of the blade: edge not aligned with the swing — blunt only.
+        sfx.hit(e.speed * 0.5, false);
+        popup(e.point, `FLAT ${e.damage}`, "flat");
+        if (e.attacker.id === playerId || e.target.id === playerId) fx.shake(0.006);
+      } else if (e.kind === "stuck") {
+        sfx.hit(6, true); hitStop = Math.max(hitStop, 0.08);
+        fx.impactAt(e.stuck.point, new THREE.Vector3(0, 0.3, 0), 3);
+        popup(e.stuck.point, "STUCK — PULL IT OUT", "crit");
+      } else if (e.kind === "unstuck") {
+        fx.impactAt(e.stuck.point, new THREE.Vector3(0, 0.5, 0), e.torn ? 9 : 5);
+        sfx.hit(e.torn ? 5 : 3, true);
+        popup(e.stuck.point, e.torn ? "TORN FREE" : "PULLED FREE", e.torn ? "crit" : "parry");
+      } else if (e.kind === "wrecked") {
+        const names: Record<Region, string> = { head: "HEAD", neck: "NECK", body: "BODY", armL: "LEFT ARM", armR: "RIGHT ARM", legL: "LEFT LEG", legR: "RIGHT LEG" };
+        banner(`${e.target.id === playerId ? "YOUR" : e.target.label.toUpperCase() + "'S"} ${names[e.region]} WRECKED`);
+        fx.impactAt(e.point, new THREE.Vector3(0, 0.4, 0), 8);
+        sfx.hit(7, false);
+      } else if (e.kind === "parried") {
+        popup(e.point, e.defender.id === playerId ? "PARRIED — RIPOSTE!" : "PARRIED", e.attacker.id === playerId ? "taken" : "parry");
       } else if (e.kind === "down") {
         banner(e.target.id === playerId ? "YOU ARE DOWN" : `${e.target.label.toUpperCase()} DOWN`);
       }
@@ -714,7 +842,12 @@ async function boot() {
     }
     hud.root.classList.toggle("has-foe", foe !== null);
     if (foe && hud.foe) hud.foe.style.width = `${(foe.health / foe.maxHealth) * 100}%`;
-    if (foe && hud.foeLabel) hud.foeLabel.textContent = foe.downTime > 0 ? `${foe.label} — down` : foe.label;
+    if (foe && hud.foeLabel) {
+      const d = dummies.get(foe.id);
+      const wrecked = foe.limbs ? (Object.entries(foe.limbs) as [Region, number][]).filter(([, v]) => v <= 0).map(([k]) => k) : [];
+      const state = foe.downTime > 0 ? "down" : d ? d.ai.currentState : "";
+      hud.foeLabel.textContent = `${foe.label} · ${state}${wrecked.length ? " · wrecked: " + wrecked.join(", ") : ""}${d && !d.sword.armed ? " · disarmed" : ""}`;
+    }
   }
 
   function setHalfSword(on: boolean): void {
@@ -742,7 +875,24 @@ async function boot() {
         controls.update();
       }
     }
+    if (!on) grabber?.releaseAll(grabWorld);
     attachHalfSword();
+    if (on && items.length === 0) {
+      // A couple of spare swords on the floor to pick up / fight over.
+      const player = playerId ? agents.get(playerId) : null;
+      const [px, , pz] = player ? player.agent.getPosition() : [0, 0, 0];
+      const r = new THREE.Vector3(-hsHeading.z, 0, hsHeading.x);
+      for (const sgn of [-1, 1]) {
+        const p = new THREE.Vector3(px, 0.03, pz).addScaledVector(r, sgn * 1.4).addScaledVector(hsHeading, 0.6);
+        const yaw = Math.random() * Math.PI * 2;
+        const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(
+          new THREE.Vector3(Math.cos(yaw), 0, Math.sin(yaw)).cross(new THREE.Vector3(0, 1, 0)).normalize(),
+          new THREE.Vector3(Math.cos(yaw), 0, Math.sin(yaw)),
+          new THREE.Vector3(0, 1, 0)));
+        const it = spawnLoose(p, q);
+        it.cooldown = 0;
+      }
+    }
     // A wide, grounded stance suits fencing; restore the walk when leaving.
     const pl = playerId ? agents.get(playerId) : null;
     if (pl?.kind === "biped") pl.agent.setStyle(on ? "LegsApart" : "Neutral");
@@ -762,10 +912,12 @@ async function boot() {
     }
     const player = playerId ? agents.get(playerId) : null;
     if (!halfSword.enabled || player?.kind !== "biped") return;
-    // Q / E turn the fighter (orbit the camera around them).
-    const turn = (input.keys.has("e") ? 1 : 0) - (input.keys.has("q") ? 1 : 0);
+    // Turning (Half Sword style): mouse with no button held while the
+    // pointer is locked; Z / C on the keyboard. Q / E are the grab keys.
+    const mouseTurn = halfSwordInput.locked && !controls_.leftHeld && !controls_.rightHeld ? controls_.dx * 0.0035 : 0;
+    const turn = ((input.keys.has("c") ? 1 : 0) - (input.keys.has("z") ? 1 : 0)) * 1.8 * dt + mouseTurn;
     if (turn !== 0) {
-      const yaw = -turn * 1.8 * dt;
+      const yaw = -turn;
       hsHeading.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
       const off = camera.position.clone().sub(controls.target);
       off.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
@@ -773,13 +925,32 @@ async function boot() {
       controls.update();
     }
     halfSword.halfGrip = hsState.halfGrip;
+    // Wrecked arms hang limp; a wrecked sword arm drops the sword.
+    if (me) {
+      halfSword.disabled.Left = (me.limbs?.armL ?? 1) <= 0;
+      halfSword.disabled.Right = (me.limbs?.armR ?? 1) <= 0;
+      if (halfSword.armed && halfSword.disabled[halfSword.mainSide]) dropSword(me);
+    }
+    // Stunned (parried) or down: no hand control.
+    if (me && ((me.stagger ?? 0) > 0)) { controls_.dx = controls_.dy = 0; }
     halfSword.update(dt, controls_);
+    grabber?.update(dt, {
+      grab: { Left: input.keys.has("q"), Right: input.keys.has("e") },
+      aim: { Left: controls_.leftHeld, Right: controls_.rightHeld },
+    }, grabWorld);
     if (hudHint) {
       const two = controls_.leftHeld && controls_.rightHeld;
       hudHint.dataset.grip = two ? (halfSword.halfGrip ? "half-sword" : "two-handed")
         : controls_.leftHeld || controls_.rightHeld ? "one hand" : "relaxed";
-      hudHint.querySelector(".grip")!.textContent =
-        `${halfSword.mainSide.toLowerCase()} hand sword · ${hudHint.dataset.grip}`;
+      const hand = (s: HandSide) => {
+        const g = grabber?.status(s);
+        if (g) return g;
+        if (halfSword.disabled[s]) return "limp";
+        if (halfSword.armed && halfSword.mainSide === s) return `sword (${hudHint.dataset.grip})`;
+        if (halfSword.armed && halfSword.isTwoHanded) return "on the sword";
+        return "free";
+      };
+      hudHint.querySelector(".grip")!.textContent = `L: ${hand("Left")}   ·   R: ${hand("Right")}`;
     }
   }
 
@@ -789,7 +960,11 @@ async function boot() {
       || t.tagName === "SELECT" || t.isContentEditable)) return;
     const k = e.key.toLowerCase();
     if (k === "h") setHalfSword(!halfSword.enabled);
-    else if (halfSword.enabled && k === "x") halfSword.swapHands();
+    else if (halfSword.enabled && k === "x" && halfSword.armed) halfSword.swapHands();
+    else if (halfSword.enabled && k === "f") {
+      const me = playerId ? combat.fighters.get(playerId) : null;
+      if (me && halfSword.armed) { dropSword(me); sfx.tap(); }
+    }
     else if (halfSword.enabled && k === "g") { hsState.halfGrip = !hsState.halfGrip; ui.pane.refresh(); }
   });
 
@@ -822,12 +997,16 @@ async function boot() {
     const { fwd, right } = cameraBasis();
 
     if (player.kind === "biped") {
-      const SPEED = input.isSprint() ? 2.0 : 1.0;
+      const meF = combat.fighters.get(player.id);
+      const legWrecked = (meF?.limbs?.legL ?? 1) <= 0 || (meF?.limbs?.legR ?? 1) <= 0;
+      const staggered = (meF?.stagger ?? 0) > 0 || (meF?.downTime ?? 0) > 0;
+      const SPEED = (input.isSprint() ? 2.0 : 1.0) * (legWrecked ? 0.5 : 1) * (staggered ? 0 : 1);
       const rawVel: Vec3 = [
         (mz * fwd[0] + mx * right[0]) * SPEED, 0,
         (mz * fwd[2] + mx * right[2]) * SPEED,
       ];
-      const vel = V.clampMagnitude(rawVel, SPEED);
+      const vel = V.clampMagnitude(rawVel, Math.max(SPEED, 1e-6));
+      if (meF?.push) { vel[0] += meF.push.x; vel[2] += meF.push.z; }
       const facing: Vec3 = halfSword.enabled
         // Half Sword: the fighter squares up to where the camera looks.
         ? [hsHeading.x, 0, hsHeading.z]
@@ -870,7 +1049,7 @@ async function boot() {
   if (import.meta.env.DEV) {
     (window as unknown as { __vibezzz: unknown }).__vibezzz = {
       camera, controls, agents, get playerId() { return playerId; },
-      combat, combatStats, dummies,
+      combat, combatStats, dummies, items, get grabber() { return grabber; }, halfSword, hsHeading, dropSword,
     };
   }
 
@@ -899,7 +1078,12 @@ async function boot() {
     drivePlayer();
     updateHalfSword(dt);
     const me = playerId ? combat.fighters.get(playerId) ?? null : null;
-    for (const d of dummies.values()) d.ai.update(dt, me);
+    combat.playerId = playerId;
+    combat.playerDamageRate = gore.playerDamage;
+    combat.npcDamageRate = gore.enemyDamage;
+    fx.bloodRate = gore.bloodRate;
+    for (const d of dummies.values()) d.ai.update(dt, me, dummyWorld);
+    for (const it of items) { it.step(dt); it.sync(); }
     for (const f of combat.fighters.values()) f.reactor.update(dt);
 
     bipedEngine.update(dt);
@@ -925,6 +1109,8 @@ async function boot() {
     };
     showSword(sword, halfSword, playerTrail, "player");
     for (const d of dummies.values()) showSword(d.mesh, d.sword, d.trail, d.id);
+    wounds.mesh.visible = gore.bloodRate > 0;
+    wounds.update();
     updateHud();
     if (bannerTimer > 0) bannerTimer -= realDt;
     renderer.render(scene, camera);
